@@ -11,6 +11,8 @@ from PIL import Image
 import dearpygui.dearpygui as dpg
 
 from tiktok_download import download_tiktok_video, download_from_profile
+from youtube_download import (download_youtube_video, download_youtube_playlist,
+                               download_youtube_multi, QUALITY_FORMATS)
 import video_edit
 
 # ── Hidden Tk root (file dialogs only) ────────────────────────────────────────
@@ -58,6 +60,7 @@ class App:
         self._logo_texture: str | None      = None   # logo texture tag (if loaded)
         # ── Edit / Batch state ────────────────────────────────────────────
         self._current_edit_tab: str         = "Resize"   # tracks selected tab
+        self._current_dl_platform: str      = "tiktok"   # tracks active download platform
         self._merge_items: list[str]        = []          # merge listbox items
         self._batch_items: list[str]        = []          # batch listbox items
 
@@ -116,7 +119,7 @@ class App:
                     screen_w = screen_w // 2
                 _screen.destroy()
         
-        dpg.create_viewport(title="TikTok Downloader",
+        dpg.create_viewport(title="TT Tools",
                             width=screen_w, height=screen_h,
                             min_width=980, min_height=580)
         dpg.setup_dearpygui()
@@ -383,67 +386,136 @@ class App:
                               border=False, no_scrollbar=True):
             dpg.bind_item_theme("pg_dl", "th_main")
             self._pages["download"] = "pg_dl"
-            self._hdr("TikTok Downloader",
-                      "Tải video từ TikTok nhanh chóng")
+            self._hdr("TT Tools",
+                      "Tải video từ nhiều nền tảng")
 
             with dpg.child_window(tag="dl_scroll", width=w, height=h - _HDR_H,
                                   border=False):
                 dpg.bind_item_theme("dl_scroll", "th_main")
                 dpg.add_spacer(height=12)
 
-                t = dpg.add_text("Chọn loại link để tải video", indent=20)
-                if dpg.does_item_exist("f_bold"):
-                    dpg.bind_item_font(t, "f_bold")
-                dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
-                             color=_CF2, indent=20)
-                dpg.add_spacer(height=10)
+                # ── Platform tab bar ──────────────────────────────────────────
+                with dpg.tab_bar(tag="dl_platform_tabs",
+                                 callback=self._on_platform_tab_change):
 
-                # Mode selector
-                dpg.add_radio_button(
-                    tag="dl_mode",
-                    items=["Single Video", "Profile", "Nhiều URLs"],
-                    default_value="Single Video", horizontal=True, indent=20,
-                    callback=self._on_dl_mode_change)
-                dpg.add_spacer(height=12)
+                    # ── TikTok tab ────────────────────────────────────────────
+                    with dpg.tab(label="  TikTok  ", tag="dl_tab_tiktok"):
+                        dpg.add_spacer(height=10)
+                        t = dpg.add_text("Chọn loại link để tải video", indent=20)
+                        if dpg.does_item_exist("f_bold"):
+                            dpg.bind_item_font(t, "f_bold")
+                        dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
+                                     color=_CF2, indent=20)
+                        dpg.add_spacer(height=10)
 
-                # ── Single URL card ──────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_single", height=90,
-                                      border=True, indent=16):
-                    dpg.add_text("VIDEO URL", color=_CF2, indent=16)
-                    dpg.add_spacer(height=6)
-                    with dpg.group(horizontal=True):
-                        dpg.add_input_text(tag="url_single", width=-80,
-                                           hint="https://www.tiktok.com/@user/video/...")
-                        dpg.add_button(label="Dán", width=70,
-                                       callback=self._paste_single)
+                        dpg.add_radio_button(
+                            tag="dl_mode",
+                            items=["Single Video", "Profile", "Nhiều URLs"],
+                            default_value="Single Video", horizontal=True, indent=20,
+                            callback=self._on_dl_mode_change)
+                        dpg.add_spacer(height=12)
 
-                # ── Profile card ──────────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_profile", height=120,
-                                      border=True, indent=16):
-                    dpg.add_text("PROFILE URL", color=_CF2, indent=16)
-                    dpg.add_spacer(height=6)
-                    dpg.add_input_text(tag="url_profile", width=-8,
-                                       hint="https://www.tiktok.com/@username")
-                    dpg.add_spacer(height=8)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
-                        dpg.add_spacer(width=8)
-                        dpg.add_input_text(tag="max_videos", width=160,
-                                           hint="để trống = tất cả")
-                dpg.hide_item("dl_card_profile")
+                        with dpg.child_window(tag="dl_card_single", height=90,
+                                              border=True, indent=16):
+                            dpg.add_text("VIDEO URL", color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            with dpg.group(horizontal=True):
+                                dpg.add_input_text(tag="url_single", width=-80,
+                                                   hint="https://www.tiktok.com/@user/video/...")
+                                dpg.add_button(label="Dán", width=70,
+                                               callback=self._paste_single)
 
-                # ── Multi URL card ────────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_multi", height=200,
-                                      border=True, indent=16):
-                    dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)", color=_CF2, indent=16)
-                    dpg.add_spacer(height=6)
-                    dpg.add_input_text(tag="multi_text", multiline=True,
-                                       width=-8, height=148)
-                dpg.hide_item("dl_card_multi")
+                        with dpg.child_window(tag="dl_card_profile", height=120,
+                                              border=True, indent=16):
+                            dpg.add_text("PROFILE URL", color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            dpg.add_input_text(tag="url_profile", width=-8,
+                                               hint="https://www.tiktok.com/@username")
+                            dpg.add_spacer(height=8)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
+                                dpg.add_spacer(width=8)
+                                dpg.add_input_text(tag="max_videos", width=160,
+                                                   hint="để trống = tất cả")
+                        dpg.hide_item("dl_card_profile")
+
+                        with dpg.child_window(tag="dl_card_multi", height=200,
+                                              border=True, indent=16):
+                            dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)",
+                                         color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            dpg.add_input_text(tag="multi_text", multiline=True,
+                                               width=-8, height=148)
+                        dpg.hide_item("dl_card_multi")
+                        dpg.add_spacer(height=8)
+
+                    # ── YouTube tab ───────────────────────────────────────────
+                    with dpg.tab(label="  YouTube  ", tag="dl_tab_youtube"):
+                        dpg.add_spacer(height=10)
+                        t = dpg.add_text("Tải video từ YouTube", indent=20)
+                        if dpg.does_item_exist("f_bold"):
+                            dpg.bind_item_font(t, "f_bold")
+                        dpg.add_text("Hỗ trợ:  Video đơn  |  Playlist  |  Nhiều URLs",
+                                     color=_CF2, indent=20)
+                        dpg.add_spacer(height=10)
+
+                        dpg.add_radio_button(
+                            tag="yt_mode",
+                            items=["Video đơn", "Playlist", "Nhiều URLs"],
+                            default_value="Video đơn", horizontal=True, indent=20,
+                            callback=self._on_yt_mode_change)
+                        dpg.add_spacer(height=12)
+
+                        with dpg.child_window(tag="yt_card_single", height=90,
+                                              border=True, indent=16):
+                            dpg.add_text("VIDEO URL", color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            with dpg.group(horizontal=True):
+                                dpg.add_input_text(
+                                    tag="yt_url_single", width=-80,
+                                    hint="https://www.youtube.com/watch?v=...")
+                                dpg.add_button(
+                                    label="Dán", width=70,
+                                    callback=lambda: self._paste_to("yt_url_single"))
+
+                        with dpg.child_window(tag="yt_card_playlist", height=120,
+                                              border=True, indent=16):
+                            dpg.add_text("PLAYLIST / CHANNEL URL", color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            dpg.add_input_text(
+                                tag="yt_playlist_url", width=-8,
+                                hint="https://www.youtube.com/playlist?list=...")
+                            dpg.add_spacer(height=8)
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
+                                dpg.add_spacer(width=8)
+                                dpg.add_input_text(tag="yt_max_items", width=160,
+                                                   hint="để trống = tất cả")
+                        dpg.hide_item("yt_card_playlist")
+
+                        with dpg.child_window(tag="yt_card_multi", height=200,
+                                              border=True, indent=16):
+                            dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)",
+                                         color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            dpg.add_input_text(tag="yt_multi_text", multiline=True,
+                                               width=-8, height=148)
+                        dpg.hide_item("yt_card_multi")
+
+                        dpg.add_spacer(height=14)
+                        with dpg.child_window(height=70, border=True, indent=16):
+                            dpg.add_text("CHẤT LƯỢNG VIDEO", color=_CF2, indent=16)
+                            dpg.add_spacer(height=6)
+                            quality_options = list(QUALITY_FORMATS.keys())
+                            dpg.add_combo(tag="yt_quality",
+                                          items=quality_options,
+                                          default_value=quality_options[0],
+                                          width=-8)
+                        dpg.add_spacer(height=8)
 
                 dpg.add_spacer(height=14)
 
-                # ── Output folder card ────────────────────────────────────────
+                # ── Shared: Output folder ─────────────────────────────────────
                 with dpg.child_window(height=82, border=True, indent=16):
                     dpg.add_text("THƯ MỤC LƯU VIDEO", color=_CF2, indent=16)
                     dpg.add_spacer(height=6)
@@ -477,6 +549,27 @@ class App:
         else:
             dpg.show_item("dl_card_multi")
 
+    def _on_yt_mode_change(self, sender, app_data):
+        for card in ["yt_card_single", "yt_card_playlist", "yt_card_multi"]:
+            dpg.hide_item(card)
+        if app_data == "Video đơn":
+            dpg.show_item("yt_card_single")
+        elif app_data == "Playlist":
+            dpg.show_item("yt_card_playlist")
+        else:
+            dpg.show_item("yt_card_multi")
+
+    def _on_platform_tab_change(self, sender, app_data):
+        """Track the currently-selected download platform tab."""
+        try:
+            label = dpg.get_item_label(app_data)
+        except Exception:
+            label = ""
+        if "YouTube" in label:
+            self._current_dl_platform = "youtube"
+        else:
+            self._current_dl_platform = "tiktok"
+
     def _on_tab_change(self, sender, app_data):
         """Track currently-selected edit tab by its string tag."""
         # app_data is the UUID of the newly-selected tab
@@ -500,6 +593,21 @@ class App:
             text = result.stdout.strip()
             if text:
                 dpg.set_value("url_single", text)
+        except Exception:
+            pass
+
+    def _paste_to(self, tag: str):
+        """Paste clipboard text into the field identified by `tag`."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['powershell', '-command', 'Get-Clipboard'],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            text = result.stdout.strip()
+            if text:
+                dpg.set_value(tag, text)
         except Exception:
             pass
 
@@ -1168,27 +1276,51 @@ class App:
 
     # ── Download logic ─────────────────────────────────────────────────────────
     def start_download(self):
-        mode = dpg.get_value("dl_mode")
-        out  = dpg.get_value("dl_out").strip() or "downloads"
+        platform = self._current_dl_platform   # "tiktok" | "youtube"
+        out = dpg.get_value("dl_out").strip() or "downloads"
 
-        if mode == "Single Video":
-            url = dpg.get_value("url_single").strip()
-            if not url:
-                self._log("Vui lòng nhập URL video.", "err"); return
-            targets = [("single", url)]
-        elif mode == "Profile":
-            url = dpg.get_value("url_profile").strip()
-            if not url:
-                self._log("Vui lòng nhập URL profile.", "err"); return
-            mv    = dpg.get_value("max_videos").strip()
-            max_v = int(mv) if mv.isdigit() else None
-            targets = [("profile", (url, max_v))]
-        else:
-            raw  = dpg.get_value("multi_text")
-            urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-            if not urls:
-                self._log("Vui lòng nhập ít nhất một URL.", "err"); return
-            targets = [("multi", urls)]
+        if platform == "tiktok":
+            mode = dpg.get_value("dl_mode")
+            if mode == "Single Video":
+                url = dpg.get_value("url_single").strip()
+                if not url:
+                    self._log("Vui lòng nhập URL video.", "err"); return
+                targets = [("tt_single", url)]
+            elif mode == "Profile":
+                url = dpg.get_value("url_profile").strip()
+                if not url:
+                    self._log("Vui lòng nhập URL profile.", "err"); return
+                mv    = dpg.get_value("max_videos").strip()
+                max_v = int(mv) if mv.isdigit() else None
+                targets = [("tt_profile", (url, max_v))]
+            else:
+                raw  = dpg.get_value("multi_text")
+                urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+                if not urls:
+                    self._log("Vui lòng nhập ít nhất một URL.", "err"); return
+                targets = [("tt_multi", urls)]
+
+        else:  # youtube
+            yt_mode = dpg.get_value("yt_mode")
+            quality = dpg.get_value("yt_quality")
+            if yt_mode == "Video đơn":
+                url = dpg.get_value("yt_url_single").strip()
+                if not url:
+                    self._log("Vui lòng nhập URL video YouTube.", "err"); return
+                targets = [("yt_single", (url, quality))]
+            elif yt_mode == "Playlist":
+                url = dpg.get_value("yt_playlist_url").strip()
+                if not url:
+                    self._log("Vui lòng nhập URL playlist / channel.", "err"); return
+                mv    = dpg.get_value("yt_max_items").strip()
+                max_v = int(mv) if mv.isdigit() else None
+                targets = [("yt_playlist", (url, quality, max_v))]
+            else:
+                raw  = dpg.get_value("yt_multi_text")
+                urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+                if not urls:
+                    self._log("Vui lòng nhập ít nhất một URL.", "err"); return
+                targets = [("yt_multi", (urls, quality))]
 
         if not os.path.exists(out):
             try:
@@ -1202,30 +1334,73 @@ class App:
                          daemon=True).start()
 
     def _worker(self, targets, out):
+        def _prog_hook(d):
+            """yt-dlp progress callback → update progress bar."""
+            try:
+                if d.get("status") == "downloading":
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    downloaded = d.get("downloaded_bytes", 0)
+                    if total > 0:
+                        dpg.set_value("dl_prog", downloaded / total)
+            except Exception:
+                pass
+
         try:
             for kind, payload in targets:
-                if kind == "single":
-                    self._log(f"Đang tải: {payload}", "info")
+                # ── TikTok ────────────────────────────────────────────────────
+                if kind == "tt_single":
+                    self._log(f"[TikTok] Đang tải: {payload}", "info")
                     fn = download_tiktok_video(payload, out)
                     self._log(
-                        f"Hoàn thành: {fn}" if fn else f"Thất bại: {payload}",
+                        f"Hoàn thành: {os.path.basename(fn)}" if fn
+                        else f"Thất bại: {payload}",
                         "ok" if fn else "err")
-                elif kind == "profile":
+
+                elif kind == "tt_profile":
                     url, max_v = payload
-                    self._log(f"Đang tải profile: {url}", "info")
+                    self._log(f"[TikTok] Đang tải profile: {url}", "info")
                     ok = download_from_profile(url, out, max_v)
                     self._log(
-                        "Tải profile hoàn thành." if ok
-                        else "Tải profile thất bại.",
+                        "Tải profile hoàn thành." if ok else "Tải profile thất bại.",
                         "ok" if ok else "err")
-                else:
+
+                elif kind == "tt_multi":
                     for url in payload:
-                        self._log(f"Đang tải: {url}", "info")
+                        self._log(f"[TikTok] Đang tải: {url}", "info")
                         fn = download_tiktok_video(url, out)
                         self._log(
-                            f"Hoàn thành: {fn}" if fn
+                            f"Hoàn thành: {os.path.basename(fn)}" if fn
                             else f"Thất bại: {url}",
                             "ok" if fn else "err")
+
+                # ── YouTube ───────────────────────────────────────────────────
+                elif kind == "yt_single":
+                    url, quality = payload
+                    self._log(f"[YouTube] Đang tải: {url}", "info")
+                    fn = download_youtube_video(url, out, quality, _prog_hook)
+                    self._log(
+                        f"Hoàn thành: {os.path.basename(fn)}" if fn
+                        else f"Thất bại: {url}",
+                        "ok" if fn else "err")
+
+                elif kind == "yt_playlist":
+                    url, quality, max_v = payload
+                    self._log(f"[YouTube] Đang tải playlist: {url}", "info")
+                    ok_n, total = download_youtube_playlist(
+                        url, out, quality, max_v, _prog_hook, self._log)
+                    self._log(
+                        f"Playlist hoàn thành: {ok_n}/{total} video.",
+                        "ok" if ok_n > 0 else "err")
+
+                elif kind == "yt_multi":
+                    urls, quality = payload
+                    self._log(f"[YouTube] Đang tải {len(urls)} URL...", "info")
+                    ok_n, total = download_youtube_multi(
+                        urls, out, quality, _prog_hook, self._log)
+                    self._log(
+                        f"Hoàn thành: {ok_n}/{total} video.",
+                        "ok" if ok_n > 0 else "err")
+
         except Exception as e:
             self._log(f"Lỗi: {e}", "err")
         finally:
