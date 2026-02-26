@@ -15,48 +15,55 @@ _tk_root = _tk.Tk()
 _tk_root.withdraw()
 
 # ── Layout constants ───────────────────────────────────────────────────────────
-_SIDEBAR_W = 90
-_LOG_W     = 340
-_HDR_H     = 62
+_SIDEBAR_W = 110
+_LOG_W     = 300
+_HDR_H     = 68
 _MAX_LOG   = 300   # max log lines kept in panel
 
-# ── Color palette  (R, G, B, A  —  0-255) ─────────────────────────────────────
-_CA      = (238,  29,  82, 255)   # accent
-_CA_H    = (196,  22,  68, 255)   # accent hover
-_CA_ACT  = (160,  10,  48, 255)   # accent active/pressed
-_CS      = ( 13,  13,  13, 255)   # sidebar / log panel bg
-_CM      = ( 24,  24,  24, 255)   # main bg
-_CC      = ( 33,  33,  33, 255)   # card bg
-_CC2     = ( 42,  42,  42, 255)   # card2 bg
-_CB      = ( 51,  51,  51, 255)   # border
-_CF      = (255, 255, 255, 255)   # foreground
-_CF2     = (136, 136, 136, 255)   # dim foreground
-_CF3     = (102, 102, 102, 255)   # hint foreground
-_CBTN    = ( 46,  46,  46, 255)   # button bg
-_CBTN_H  = ( 58,  58,  58, 255)   # button hover
-_CL      = ( 20,  20,  20, 255)   # log bg
+# ── Color palette  (R, G, B, A  —  0‑255) ─────────────────────────────────────
+_CA      = (238,  29,  82, 255)   # accent (TikTok pink-red)
+_CA_H    = (200,  24,  70, 255)   # accent hover
+_CA_ACT  = (165,  15,  55, 255)   # accent pressed
+_CS      = ( 18,  18,  18, 255)   # sidebar / header / log panel bg
+_CM      = ( 22,  22,  22, 255)   # main content bg
+_CC      = ( 32,  32,  32, 255)   # card bg
+_CC2     = ( 40,  40,  40, 255)   # frame / input bg
+_CB      = ( 50,  50,  50, 255)   # border
+_CF      = (240, 240, 240, 255)   # primary text
+_CF2     = (160, 160, 160, 255)   # secondary text
+_CF3     = (110, 110, 110, 255)   # hint / placeholder
+_CBTN    = ( 48,  48,  48, 255)   # button bg
+_CBTN_H  = ( 62,  62,  62, 255)   # button hover
+_CL      = ( 14,  14,  14, 255)   # log content bg
 _CL_OK   = ( 76, 175,  80, 255)
 _CL_ERR  = (239,  83,  80, 255)
 _CL_INFO = ( 66, 165, 245, 255)
-_CL_TS   = ( 85,  85,  85, 255)
 _CTRANS  = (  0,   0,   0,   0)
+_CNAV    = ( 38,  38,  38, 255)   # nav button active bg
+_CNAV_H  = ( 30,  30,  30, 255)   # nav button hover (inactive)
 
 
 class App:
     def __init__(self):
-        self._current_page: str | None = None
-        self._pages: dict[str, str]    = {}    # page_id → child_window tag
-        self._nav_btns: dict[str, str] = {}    # page_id → button tag
-        self._log_queue: queue.Queue   = queue.Queue()
-        self._log_items: list[str]     = []
-        self._log_counter: int         = 0
+        self._current_page: str | None     = None
+        self._pages: dict[str, str]         = {}    # page_id → child_window tag
+        self._nav_btns: dict[str, str]      = {}    # page_id → button tag
+        self._log_queue: queue.Queue        = queue.Queue()
+        self._dlg_queue: queue.Queue        = queue.Queue()
+        self._log_items: list[str]          = []
+        self._log_counter: int              = 0
+        # ── Edit / Batch state ────────────────────────────────────────────
+        self._current_edit_tab: str         = "Resize"   # tracks selected tab
+        self._merge_items: list[str]        = []          # merge listbox items
+        self._batch_items: list[str]        = []          # batch listbox items
 
     # ─────────────────────────────────────────────────────────────────────────
     def run(self):
         dpg.create_context()
         self._setup_fonts()
         self._setup_themes()
-        dpg.create_viewport(title="TikTok Downloader", width=1280, height=760,
+        dpg.create_viewport(title="TikTok Downloader",
+                            width=1280, height=760,
                             min_width=980, min_height=580)
         dpg.setup_dearpygui()
         self._build_ui()
@@ -71,19 +78,34 @@ class App:
     def _setup_fonts(self):
         reg  = "C:/Windows/Fonts/segoeui.ttf"
         bold = "C:/Windows/Fonts/segoeuib.ttf"
+        _xr = [                                # extra Unicode ranges
+            (0x2000, 0x206F),  # General Punctuation
+            (0x2190, 0x21FF),  # Arrows
+            (0x2500, 0x257F),  # Box Drawing
+            (0x25A0, 0x25FF),  # Geometric Shapes  (▶)
+            (0x2600, 0x26FF),  # Misc Symbols
+            (0x2700, 0x27BF),  # Dingbats
+        ]
         with dpg.font_registry():
             if os.path.exists(reg):
-                with dpg.font(reg, 14, tag="f_reg"):
+                with dpg.font(reg, 15, tag="f_reg"):
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
-                    dpg.add_font_range(0x2190, 0x21FF)   # arrows ←→↑↓
-                    dpg.add_font_range(0x2700, 0x27BF)   # dingbats ✂
+                    for lo, hi in _xr:
+                        dpg.add_font_range(lo, hi)
                 dpg.bind_font("f_reg")
             if os.path.exists(bold):
-                with dpg.font(bold, 16, tag="f_title"):
+                with dpg.font(bold, 18, tag="f_title"):
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
-                with dpg.font(bold, 13, tag="f_bold"):
+                    for lo, hi in _xr:
+                        dpg.add_font_range(lo, hi)
+                with dpg.font(bold, 14, tag="f_bold"):
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
+                    for lo, hi in _xr:
+                        dpg.add_font_range(lo, hi)
+                with dpg.font(bold, 13, tag="f_nav"):
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
                     dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
 
@@ -96,12 +118,12 @@ class App:
                 dpg.add_theme_color(dpg.mvThemeCol_ChildBg,            _CC)
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBg,            _CC2)
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered,     _CBTN_H)
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive,      _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive,      _CB)
                 dpg.add_theme_color(dpg.mvThemeCol_Button,             _CBTN)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,      _CBTN_H)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,       _CA_ACT)
                 dpg.add_theme_color(dpg.mvThemeCol_Text,               _CF)
-                dpg.add_theme_color(dpg.mvThemeCol_TextDisabled,       _CF2)
+                dpg.add_theme_color(dpg.mvThemeCol_TextDisabled,       _CF3)
                 dpg.add_theme_color(dpg.mvThemeCol_Border,             _CB)
                 dpg.add_theme_color(dpg.mvThemeCol_BorderShadow,       _CTRANS)
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg,        _CM)
@@ -111,24 +133,25 @@ class App:
                 dpg.add_theme_color(dpg.mvThemeCol_Header,             _CBTN)
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered,      _CBTN_H)
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderActive,       _CA)
-                dpg.add_theme_color(dpg.mvThemeCol_Tab,                _CBTN)
-                dpg.add_theme_color(dpg.mvThemeCol_TabHovered,         _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_Tab,                _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_TabHovered,         _CA_H)
                 dpg.add_theme_color(dpg.mvThemeCol_TabActive,          _CA)
-                dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, _CA_H)
                 dpg.add_theme_color(dpg.mvThemeCol_TitleBg,            _CS)
                 dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive,      _CS)
                 dpg.add_theme_color(dpg.mvThemeCol_PopupBg,            _CC)
                 dpg.add_theme_color(dpg.mvThemeCol_CheckMark,          _CA)
                 dpg.add_theme_color(dpg.mvThemeCol_SliderGrab,         _CA)
                 dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive,   _CA_H)
-                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding,    0)
-                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding,      8)
-                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding,      6)
-                dpg.add_theme_style(dpg.mvStyleVar_GrabRounding,       4)
+                dpg.add_theme_color(dpg.mvThemeCol_Separator,          _CB)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding,     0)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding,      6)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding,      5)
+                dpg.add_theme_style(dpg.mvStyleVar_GrabRounding,       3)
                 dpg.add_theme_style(dpg.mvStyleVar_ScrollbarRounding,  4)
-                dpg.add_theme_style(dpg.mvStyleVar_TabRounding,        6)
+                dpg.add_theme_style(dpg.mvStyleVar_TabRounding,        5)
                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding,      0, 0)
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,       8, 5)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,       10, 6)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,        8, 6)
                 dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize,      10)
         dpg.bind_theme("th_global")
@@ -148,30 +171,33 @@ class App:
             with dpg.theme_component(dpg.mvChildWindow):
                 dpg.add_theme_color(dpg.mvThemeCol_ChildBg, _CL)
 
-        # ── accent button ────────────────────────────────────────────────────
+        # ── accent button (red CTA) ─────────────────────────────────────────
         with dpg.theme(tag="th_accent"):
             with dpg.theme_component(dpg.mvButton):
                 dpg.add_theme_color(dpg.mvThemeCol_Button,        _CA)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CA_H)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CA_ACT)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6)
 
         # ── nav button: active ───────────────────────────────────────────────
         with dpg.theme(tag="th_nav_on"):
             with dpg.theme_component(dpg.mvButton):
-                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CC2)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CC2)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CNAV)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CNAV)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CNAV)
                 dpg.add_theme_color(dpg.mvThemeCol_Text,          _CF)
-                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 10)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 8)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  8, 10)
 
         # ── nav button: inactive ─────────────────────────────────────────────
         with dpg.theme(tag="th_nav_off"):
             with dpg.theme_component(dpg.mvButton):
                 dpg.add_theme_color(dpg.mvThemeCol_Button,        _CTRANS)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CBTN_H)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CNAV_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CNAV)
                 dpg.add_theme_color(dpg.mvThemeCol_Text,          _CF2)
-                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 10)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 8)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  8, 10)
 
         # ── logo box ─────────────────────────────────────────────────────────
         with dpg.theme(tag="th_logo"):
@@ -179,8 +205,8 @@ class App:
                 dpg.add_theme_color(dpg.mvThemeCol_Button,        _CA)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CA)
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CA)
-                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 12)
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  12, 10)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 14)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  14, 12)
 
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -204,28 +230,37 @@ class App:
         with dpg.child_window(tag="sidebar", width=_SIDEBAR_W, height=h,
                               border=False, no_scrollbar=True):
             dpg.bind_item_theme("sidebar", "th_sidebar")
-            dpg.add_spacer(height=14)
-            logo = dpg.add_button(label="▶", width=46, height=46, enabled=False,
-                                  indent=(_SIDEBAR_W - 46) // 2)
-            dpg.bind_item_theme(logo, "th_logo")
-            if dpg.does_item_exist("f_bold"):
-                dpg.bind_item_font(logo, "f_bold")
-            dpg.add_text("DowRen", color=_CF2, indent=27)
-            dpg.add_spacer(height=10)
-            dpg.add_separator()
-            dpg.add_spacer(height=10)
 
-            for page_id, icon, label in [
-                ("download", "↓",  "Tai"),
-                ("edit",     "✂",  "Edit"),
-                ("batch",    "☰",  "Batch"),
+            # ── Logo area ────────────────────────────────────────────────────
+            dpg.add_spacer(height=18)
+            logo = dpg.add_button(label="D", width=50, height=50,
+                                  enabled=False,
+                                  indent=(_SIDEBAR_W - 50) // 2)
+            dpg.bind_item_theme(logo, "th_logo")
+            if dpg.does_item_exist("f_title"):
+                dpg.bind_item_font(logo, "f_title")
+            dpg.add_spacer(height=6)
+            name_txt = dpg.add_text("Lạc trôi", color=_CF2, indent=28)
+            if dpg.does_item_exist("f_nav"):
+                dpg.bind_item_font(name_txt, "f_nav")
+            dpg.add_spacer(height=16)
+            dpg.add_separator()
+            dpg.add_spacer(height=16)
+
+            # ── Navigation buttons ───────────────────────────────────────────
+            for page_id, label in [
+                ("download", "Tải Video"),
+                ("edit",     "Chỉnh Sửa"),
+                ("batch",    "Batch Edit"),
             ]:
                 btn = dpg.add_button(
-                    label=f"{icon}\n{label}", tag=f"nav_{page_id}",
-                    width=_SIDEBAR_W - 12, height=58,
+                    label=label, tag=f"nav_{page_id}",
+                    width=_SIDEBAR_W - 16, height=38,
                     callback=lambda s, a, u: self._switch_page(u),
-                    user_data=page_id, indent=6)
+                    user_data=page_id, indent=8)
                 dpg.bind_item_theme(btn, "th_nav_off")
+                if dpg.does_item_exist("f_nav"):
+                    dpg.bind_item_font(btn, "f_nav")
                 self._nav_btns[page_id] = f"nav_{page_id}"
                 dpg.add_spacer(height=4)
 
@@ -252,11 +287,12 @@ class App:
     def _hdr(self, title: str, subtitle: str):
         with dpg.child_window(height=_HDR_H, border=False, no_scrollbar=True) as c:
             dpg.bind_item_theme(c, "th_sidebar")
-            dpg.add_spacer(height=8)
-            t = dpg.add_text(title, indent=20)
+            dpg.add_spacer(height=12)
+            t = dpg.add_text(title, indent=24)
             if dpg.does_item_exist("f_title"):
                 dpg.bind_item_font(t, "f_title")
-            dpg.add_text(subtitle, color=_CF2, indent=22)
+            dpg.add_spacer(height=4)
+            dpg.add_text(subtitle, color=_CF2, indent=24)
 
     # ── Download page ──────────────────────────────────────────────────────────
     def _build_download_page(self, w: int, h: int):
@@ -264,88 +300,89 @@ class App:
                               border=False, no_scrollbar=True):
             dpg.bind_item_theme("pg_dl", "th_main")
             self._pages["download"] = "pg_dl"
-            self._hdr("TikTok Downloader", "Created by thongtruong")
+            self._hdr("TikTok Downloader",
+                      "Tải video từ TikTok nhanh chóng")
 
             with dpg.child_window(tag="dl_scroll", width=w, height=h - _HDR_H,
                                   border=False):
                 dpg.bind_item_theme("dl_scroll", "th_main")
-                dpg.add_spacer(height=10)
+                dpg.add_spacer(height=12)
 
-                t = dpg.add_text("Chon loai link de tai video", indent=16)
+                t = dpg.add_text("Chọn loại link để tải video", indent=20)
                 if dpg.does_item_exist("f_bold"):
                     dpg.bind_item_font(t, "f_bold")
-                dpg.add_text("Ho tro: Single Video  •  Profile  •  Nhieu URLs",
-                             color=_CF2, indent=16)
+                dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
+                             color=_CF2, indent=20)
                 dpg.add_spacer(height=10)
 
-                # Mode selector (radio buttons styled as segmented control)
+                # Mode selector
                 dpg.add_radio_button(
                     tag="dl_mode",
-                    items=["Single Video", "Profile", "Nhieu URLs"],
-                    default_value="Single Video", horizontal=True, indent=16,
+                    items=["Single Video", "Profile", "Nhiều URLs"],
+                    default_value="Single Video", horizontal=True, indent=20,
                     callback=self._on_dl_mode_change)
-                dpg.add_spacer(height=10)
+                dpg.add_spacer(height=12)
 
                 # ── Single URL card ──────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_single", height=88,
-                                      border=True, indent=12):
-                    dpg.add_text("VIDEO URL", color=_CF2)
-                    dpg.add_spacer(height=4)
+                with dpg.child_window(tag="dl_card_single", height=90,
+                                      border=True, indent=16):
+                    dpg.add_text("VIDEO URL", color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
-                        dpg.add_input_text(tag="url_single", width=-76,
+                        dpg.add_input_text(tag="url_single", width=-80,
                                            hint="https://www.tiktok.com/@user/video/...")
-                        dpg.add_button(label="Dan", width=68,
+                        dpg.add_button(label="Dán", width=70,
                                        callback=self._paste_single)
 
                 # ── Profile card ──────────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_profile", height=116,
-                                      border=True, indent=12):
-                    dpg.add_text("PROFILE URL", color=_CF2)
-                    dpg.add_spacer(height=4)
-                    dpg.add_input_text(tag="url_profile", width=-4,
-                                       hint="https://www.tiktok.com/@username")
+                with dpg.child_window(tag="dl_card_profile", height=120,
+                                      border=True, indent=16):
+                    dpg.add_text("PROFILE URL", color=_CF2, indent=16)
                     dpg.add_spacer(height=6)
+                    dpg.add_input_text(tag="url_profile", width=-8,
+                                       hint="https://www.tiktok.com/@username")
+                    dpg.add_spacer(height=8)
                     with dpg.group(horizontal=True):
-                        dpg.add_text("So video toi da:", color=_CF2)
+                        dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
                         dpg.add_spacer(width=8)
                         dpg.add_input_text(tag="max_videos", width=160,
-                                           hint="de trong = tat ca")
+                                           hint="để trống = tất cả")
                 dpg.hide_item("dl_card_profile")
 
                 # ── Multi URL card ────────────────────────────────────────────
-                with dpg.child_window(tag="dl_card_multi", height=190,
-                                      border=True, indent=12):
-                    dpg.add_text("DANH SACH URL  (moi dong 1 link)", color=_CF2)
-                    dpg.add_spacer(height=4)
+                with dpg.child_window(tag="dl_card_multi", height=200,
+                                      border=True, indent=16):
+                    dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)", color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     dpg.add_input_text(tag="multi_text", multiline=True,
-                                       width=-4, height=140)
+                                       width=-8, height=148)
                 dpg.hide_item("dl_card_multi")
 
-                dpg.add_spacer(height=12)
+                dpg.add_spacer(height=14)
 
                 # ── Output folder card ────────────────────────────────────────
-                with dpg.child_window(height=78, border=True, indent=12):
-                    dpg.add_text("THU MUC LUU VIDEO", color=_CF2)
-                    dpg.add_spacer(height=4)
+                with dpg.child_window(height=82, border=True, indent=16):
+                    dpg.add_text("THƯ MỤC LƯU VIDEO", color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="dl_out", default_value="downloads",
-                                           width=-164)
-                        dpg.add_button(label="Browse", width=76,
+                                           width=-186)
+                        dpg.add_button(label="Duyệt...", width=84,
                                        callback=lambda: self._browse_dir("dl_out"))
                         dpg.add_spacer(width=4)
-                        dpg.add_button(label="Mo thu muc", width=80,
+                        dpg.add_button(label="Mở thư mục", width=90,
                                        callback=self._open_output)
 
-                dpg.add_spacer(height=12)
-                dl_btn = dpg.add_button(label="  ▶   Bat dau tai  ", tag="dl_btn",
-                                        width=-12, height=46, indent=12,
+                dpg.add_spacer(height=14)
+                dl_btn = dpg.add_button(label="Bắt đầu tải", tag="dl_btn",
+                                        width=-16, height=44, indent=16,
                                         callback=self.start_download)
                 dpg.bind_item_theme(dl_btn, "th_accent")
                 if dpg.does_item_exist("f_bold"):
                     dpg.bind_item_font(dl_btn, "f_bold")
-                dpg.add_spacer(height=6)
-                dpg.add_progress_bar(tag="dl_prog", width=-12, height=6,
-                                     indent=12, default_value=0.0)
+                dpg.add_spacer(height=8)
+                dpg.add_progress_bar(tag="dl_prog", width=-16, height=5,
+                                     indent=16, default_value=0.0)
 
     def _on_dl_mode_change(self, sender, app_data):
         for card in ["dl_card_single", "dl_card_profile", "dl_card_multi"]:
@@ -357,10 +394,29 @@ class App:
         else:
             dpg.show_item("dl_card_multi")
 
-    def _paste_single(self):
+    def _on_tab_change(self, sender, app_data):
+        """Track currently-selected edit tab by its string tag."""
+        # app_data is the UUID of the newly-selected tab
+        label = ""
         try:
-            _tk_root.update()
-            dpg.set_value("url_single", _tk_root.clipboard_get().strip())
+            label = dpg.get_item_label(app_data)
+        except Exception:
+            pass
+        if label:
+            self._current_edit_tab = label
+
+    def _paste_single(self):
+        """Paste clipboard text into the URL field using subprocess (no Tk needed)."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['powershell', '-command', 'Get-Clipboard'],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            text = result.stdout.strip()
+            if text:
+                dpg.set_value("url_single", text)
         except Exception:
             pass
 
@@ -371,179 +427,187 @@ class App:
             dpg.bind_item_theme("pg_edit", "th_main")
             dpg.hide_item("pg_edit")
             self._pages["edit"] = "pg_edit"
-            self._hdr("✂  Edit Video",
-                      "Chinh sua video don le voi cac thao tac FFmpeg")
+            self._hdr("Chỉnh Sửa Video",
+                      "Chỉnh sửa video đơn lẻ với các thao tác FFmpeg")
 
             with dpg.child_window(tag="edit_scroll", width=w, height=h - _HDR_H,
                                   border=False):
                 dpg.bind_item_theme("edit_scroll", "th_main")
                 dpg.add_spacer(height=10)
 
-                # Input
-                with dpg.child_window(height=78, border=True, indent=12):
-                    dpg.add_text("FILE INPUT", color=_CF2)
-                    dpg.add_spacer(height=4)
+                # Input file
+                with dpg.child_window(height=80, border=True, indent=16):
+                    dpg.add_text("FILE ĐẦU VÀO", color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="edit_in", width=-120,
-                                           hint="Chon file video...")
-                        dpg.add_button(label="Browse...", width=112,
+                                           hint="Chọn file video...")
+                        dpg.add_button(label="Duyệt...", width=110,
                                        callback=self._browse_edit_in)
-                dpg.add_spacer(height=8)
+                dpg.add_spacer(height=10)
 
                 # Op tabs
-                with dpg.tab_bar(tag="op_tabs", indent=12):
-                    with dpg.tab(label="Resize"):
+                with dpg.tab_bar(tag="op_tabs", indent=16,
+                                 callback=self._on_tab_change):
+                    with dpg.tab(label="Resize",  tag="tab_resize"):
                         self._tab_resize()
-                    with dpg.tab(label="Audio"):
+                    with dpg.tab(label="Audio",   tag="tab_audio"):
                         self._tab_audio()
-                    with dpg.tab(label="Convert"):
+                    with dpg.tab(label="Convert", tag="tab_convert"):
                         self._tab_convert()
-                    with dpg.tab(label="Speed"):
+                    with dpg.tab(label="Speed",   tag="tab_speed"):
                         self._tab_speed()
-                    with dpg.tab(label="Rotate"):
+                    with dpg.tab(label="Rotate",  tag="tab_rotate"):
                         self._tab_rotate()
-                    with dpg.tab(label="Merge"):
+                    with dpg.tab(label="Merge",   tag="tab_merge"):
                         self._tab_merge()
-                    with dpg.tab(label="Logo"):
+                    with dpg.tab(label="Logo",    tag="tab_logo"):
                         self._tab_logo()
 
-                dpg.add_spacer(height=8)
+                dpg.add_spacer(height=10)
 
-                # Output
-                with dpg.child_window(height=78, border=True, indent=12):
-                    dpg.add_text("FILE OUTPUT  (de trong = tu dong dat ten)", color=_CF2)
-                    dpg.add_spacer(height=4)
+                # Output file
+                with dpg.child_window(height=80, border=True, indent=16):
+                    dpg.add_text("FILE ĐẦU RA  (để trống = tự động đặt tên)",
+                                 color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="edit_out", width=-120,
-                                           hint="Luu tai...")
-                        dpg.add_button(label="Save As...", width=112,
+                                           hint="Lưu tại...")
+                        dpg.add_button(label="Lưu...", width=110,
                                        callback=self._browse_edit_out)
 
-                dpg.add_spacer(height=12)
-                edit_btn = dpg.add_button(label="  ▶   Apply Edit  ", tag="edit_btn",
-                                          width=-12, height=46, indent=12,
+                dpg.add_spacer(height=14)
+                edit_btn = dpg.add_button(label="Áp dụng chỉnh sửa",
+                                          tag="edit_btn",
+                                          width=-16, height=44, indent=16,
                                           callback=self._apply_edit)
                 dpg.bind_item_theme(edit_btn, "th_accent")
                 if dpg.does_item_exist("f_bold"):
                     dpg.bind_item_font(edit_btn, "f_bold")
-                dpg.add_spacer(height=6)
-                dpg.add_progress_bar(tag="edit_prog", width=-12, height=6,
-                                     indent=12, default_value=0.0)
+                dpg.add_spacer(height=8)
+                dpg.add_progress_bar(tag="edit_prog", width=-16, height=5,
+                                     indent=16, default_value=0.0)
 
     def _tab_resize(self):
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True, indent=16):
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
             dpg.add_text("Preset:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_combo(tag="res_preset", items=list(video_edit.PRESETS.keys()),
-                          default_value="720p  (1280x720)", width=220,
+                          default_value="720p  (1280×720)", width=220,
                           callback=self._on_preset_change)
-        dpg.add_spacer(height=6)
-        with dpg.group(horizontal=True, indent=16):
-            dpg.add_text("Width: ", color=_CF2)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Width:", color=_CF2)
+            dpg.add_spacer(width=4)
             dpg.add_input_text(tag="res_w", default_value="1280", width=100)
             dpg.add_spacer(width=16)
             dpg.add_text("Height:", color=_CF2)
+            dpg.add_spacer(width=4)
             dpg.add_input_text(tag="res_h", default_value="720", width=100)
-        dpg.add_spacer(height=4)
-        dpg.add_text("Dung -1 cho mot chieu de giu ti le khung hinh.",
-                     color=_CF3, indent=16)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Dùng -1 cho một chiều để giữ tỉ lệ khung hình.",
+                     color=_CF3, indent=20)
 
     def _tab_audio(self):
-        dpg.add_spacer(height=8)
+        dpg.add_spacer(height=10)
         dpg.add_radio_button(tag="audio_mode",
-                             items=["Extract audio  (lay am thanh ra file rieng)",
-                                    "Remove audio   (tat tieng video)"],
-                             default_value="Extract audio  (lay am thanh ra file rieng)",
-                             indent=16)
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True, indent=16):
+                             items=["Extract audio  (lấy âm thanh ra file riêng)",
+                                    "Remove audio   (tắt tiếng video)"],
+                             default_value="Extract audio  (lấy âm thanh ra file riêng)",
+                             indent=20)
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
             dpg.add_text("Format:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_combo(tag="audio_fmt",
                           items=["mp3", "aac", "wav", "ogg", "m4a"],
                           default_value="mp3", width=120)
-        dpg.add_text("(ap dung khi extract audio)", color=_CF3, indent=16)
+        dpg.add_text("(áp dụng khi extract audio)", color=_CF3, indent=20)
 
     def _tab_convert(self):
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True, indent=16):
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
             dpg.add_text("Output format:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_combo(tag="conv_fmt", items=video_edit.FORMATS,
                           default_value="mp4", width=120)
-        dpg.add_spacer(height=4)
-        dpg.add_text("FFmpeg tu chon codec phu hop cho container.",
-                     color=_CF3, indent=16)
+        dpg.add_spacer(height=6)
+        dpg.add_text("FFmpeg tự chọn codec phù hợp cho container.",
+                     color=_CF3, indent=20)
 
     def _tab_speed(self):
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True, indent=16):
-            dpg.add_text("Speed multiplier:", color=_CF2)
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Tốc độ:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_input_text(tag="spd_val", default_value="2.00", width=100)
         dpg.add_spacer(height=10)
-        dpg.add_text("Nhanh chon:", color=_CF2, indent=16)
-        dpg.add_spacer(height=4)
-        with dpg.group(horizontal=True, indent=16):
+        dpg.add_text("Nhanh chọn:", color=_CF2, indent=20)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=20):
             for lbl, val in [("0.5x", "0.50"), ("0.75x", "0.75"), ("1x", "1.00"),
                               ("1.5x", "1.50"), ("2x", "2.00"), ("4x", "4.00")]:
                 dpg.add_button(label=lbl, width=56,
                                callback=lambda s, a, u: dpg.set_value("spd_val", u),
                                user_data=val)
                 dpg.add_spacer(width=4)
-        dpg.add_spacer(height=4)
-        dpg.add_text("< 1.0 = cham  |  > 1.0 = nhanh  |  pham vi 0.25-4.0",
-                     color=_CF3, indent=16)
+        dpg.add_spacer(height=6)
+        dpg.add_text("< 1.0 = chậm  |  > 1.0 = nhanh  |  phạm vi 0.25 – 4.0",
+                     color=_CF3, indent=20)
 
     def _tab_rotate(self):
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True, indent=16):
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
             dpg.add_text("Rotation / Flip:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_combo(tag="rot_choice",
                           items=list(video_edit.ROTATIONS.keys()),
                           default_value=list(video_edit.ROTATIONS.keys())[0],
                           width=280)
-        dpg.add_spacer(height=4)
-        dpg.add_text("Ap dung bo loc vf cua FFmpeg — video duoc re-encode.",
-                     color=_CF3, indent=16)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Áp dụng bộ lọc vf của FFmpeg — video được re-encode.",
+                     color=_CF3, indent=20)
 
     def _tab_merge(self):
-        dpg.add_spacer(height=8)
-        dpg.add_text("Danh sach file video:", color=_CF2, indent=16)
-        dpg.add_spacer(height=4)
-        dpg.add_listbox(tag="merge_list", items=[], width=-16, num_items=5, indent=12)
+        dpg.add_spacer(height=10)
+        dpg.add_text("Danh sách file video:", color=_CF2, indent=20)
         dpg.add_spacer(height=6)
-        with dpg.group(horizontal=True, indent=12):
-            for lbl, cb in [("Add...",  self._merge_add),
-                             ("Remove", self._merge_remove),
-                             ("Up",     lambda: self._merge_move(-1)),
-                             ("Down",   lambda: self._merge_move(1)),
-                             ("Clear",  lambda: dpg.configure_item("merge_list", items=[]))]:
-                dpg.add_button(label=lbl, width=68, callback=cb)
-                dpg.add_spacer(width=4)
-        dpg.add_spacer(height=4)
-        dpg.add_text("Stream-copy — cuc nhanh, khong mat chat luong.",
-                     color=_CF3, indent=16)
-
-    def _tab_logo(self):
-        dpg.add_spacer(height=8)
-        dpg.add_text("File logo (PNG/JPG):", color=_CF2, indent=16)
-        dpg.add_spacer(height=4)
-        with dpg.group(horizontal=True, indent=12):
-            dpg.add_input_text(tag="logo_path", width=-120, hint="Chon file logo...")
-            dpg.add_button(label="Browse...", width=112, callback=self._browse_logo)
+        dpg.add_listbox(tag="merge_list", items=[], width=-20,
+                        num_items=5, indent=16)
         dpg.add_spacer(height=8)
         with dpg.group(horizontal=True, indent=16):
-            dpg.add_text("Vi tri:", color=_CF2)
+            for lbl, cb in [("Thêm...",  self._merge_add),
+                             ("Xóa",     self._merge_remove),
+                             ("Lên",     lambda: self._merge_move(-1)),
+                             ("Xuống",   lambda: self._merge_move(1)),
+                             ("Xóa hết", self._merge_clear)]:
+                dpg.add_button(label=lbl, width=72, callback=cb)
+                dpg.add_spacer(width=4)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Stream-copy — cực nhanh, không mất chất lượng.",
+                     color=_CF3, indent=20)
+
+    def _tab_logo(self):
+        dpg.add_spacer(height=10)
+        dpg.add_text("File logo (PNG/JPG):", color=_CF2, indent=20)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_input_text(tag="logo_path", width=-120,
+                               hint="Chọn file logo...")
+            dpg.add_button(label="Duyệt...", width=110,
+                           callback=self._browse_logo)
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Vị trí:", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_combo(tag="logo_pos",
                           items=list(video_edit.LOGO_POSITIONS.keys()),
                           default_value="Bottom-Right", width=180,
                           callback=self._on_logo_pos_change)
-        with dpg.group(tag="logo_custom", horizontal=False, indent=16):
-            dpg.add_spacer(height=4)
+        with dpg.group(tag="logo_custom", horizontal=False, indent=20):
+            dpg.add_spacer(height=6)
             with dpg.group(horizontal=True):
                 dpg.add_text("X:", color=_CF2)
                 dpg.add_input_text(tag="logo_x", default_value="W-w-10", width=110)
@@ -551,18 +615,18 @@ class App:
                 dpg.add_text("Y:", color=_CF2)
                 dpg.add_input_text(tag="logo_y", default_value="H-h-20", width=110)
         dpg.hide_item("logo_custom")
-        dpg.add_spacer(height=4)
-        with dpg.group(horizontal=True, indent=16):
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=20):
             dpg.add_text("Scale (px):", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_input_text(tag="logo_scale", default_value="150", width=100)
-        with dpg.group(horizontal=True, indent=16):
-            dpg.add_text("Opacity:  ", color=_CF2)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Opacity:   ", color=_CF2)
             dpg.add_spacer(width=8)
             dpg.add_input_text(tag="logo_opacity", default_value="1.00", width=100)
-        dpg.add_spacer(height=4)
-        dpg.add_text("Dung PNG co nen trong suot de logo dep nhat.",
-                     color=_CF3, indent=16)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Dùng PNG có nền trong suốt để logo đẹp nhất.",
+                     color=_CF3, indent=20)
 
     # ── Batch page ─────────────────────────────────────────────────────────────
     def _build_batch_page(self, w: int, h: int):
@@ -571,8 +635,8 @@ class App:
             dpg.bind_item_theme("pg_batch", "th_main")
             dpg.hide_item("pg_batch")
             self._pages["batch"] = "pg_batch"
-            self._hdr("☰  Batch Edit",
-                      "Ap dung cung mot thao tac cho nhieu video cung luc")
+            self._hdr("Batch Edit",
+                      "Áp dụng cùng thao tác cho nhiều video cùng lúc")
 
             with dpg.child_window(tag="batch_scroll", width=w, height=h - _HDR_H,
                                   border=False):
@@ -580,63 +644,65 @@ class App:
                 dpg.add_spacer(height=10)
 
                 # File list
-                with dpg.child_window(height=186, border=True, indent=12):
-                    dpg.add_text("DANH SACH FILE INPUT", color=_CF2)
-                    dpg.add_spacer(height=4)
-                    dpg.add_listbox(tag="batch_list", items=[], width=-8, num_items=5)
-                    dpg.add_spacer(height=4)
+                with dpg.child_window(height=200, border=True, indent=16):
+                    dpg.add_text("DANH SÁCH FILE ĐẦU VÀO", color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
+                    dpg.add_listbox(tag="batch_list", items=[], width=-8,
+                                    num_items=5)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
-                        dpg.add_button(label="Add...",  width=82,
+                        dpg.add_button(label="Thêm...", width=84,
                                        callback=self._batch_add_files)
                         dpg.add_spacer(width=4)
-                        dpg.add_button(label="Remove",  width=82,
-                                       callback=self._batch_remove_files)
+                        dpg.add_button(label="Xóa", width=84,
+                                       callback=self._batch_remove_file)
                         dpg.add_spacer(width=4)
-                        dpg.add_button(label="Clear",   width=82,
-                                       callback=lambda: dpg.configure_item(
-                                           "batch_list", items=[]))
+                        dpg.add_button(label="Xóa hết", width=84,
+                                       callback=self._batch_clear)
 
-                dpg.add_spacer(height=8)
+                dpg.add_spacer(height=10)
 
                 # Output dir
-                with dpg.child_window(height=78, border=True, indent=12):
-                    dpg.add_text("THU MUC OUTPUT  (de trong = cung thu muc goc)",
-                                 color=_CF2)
-                    dpg.add_spacer(height=4)
+                with dpg.child_window(height=80, border=True, indent=16):
+                    dpg.add_text("THƯ MỤC ĐẦU RA  (để trống = cùng thư mục gốc)",
+                                 color=_CF2, indent=16)
+                    dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="batch_out", width=-120,
-                                           hint="Chon thu muc...")
-                        dpg.add_button(label="Browse...", width=112,
-                                       callback=lambda: self._browse_dir("batch_out"))
+                                           hint="Chọn thư mục...")
+                        dpg.add_button(label="Duyệt...", width=110,
+                                       callback=lambda: self._browse_dir(
+                                           "batch_out"))
 
-                dpg.add_spacer(height=8)
+                dpg.add_spacer(height=10)
 
                 # Operation selector
                 _BOPS = ["Resize", "Extract Audio", "Remove Audio",
                          "Convert", "Speed", "Rotate", "Logo"]
-                with dpg.child_window(height=190, border=True, indent=12):
-                    dpg.add_text("THAO TAC AP DUNG CHO TAT CA FILE", color=_CF2)
-                    dpg.add_spacer(height=6)
+                with dpg.child_window(height=200, border=True, indent=16):
+                    dpg.add_text("THAO TÁC ÁP DỤNG CHO TẤT CẢ FILE", color=_CF2, indent=16)
+                    dpg.add_spacer(height=8)
                     with dpg.group(horizontal=True):
-                        dpg.add_text("Chon thao tac:", color=_CF2)
+                        dpg.add_text("Chọn thao tác:", color=_CF2, indent=16)
                         dpg.add_spacer(width=8)
                         dpg.add_combo(tag="batch_op", items=_BOPS,
                                       default_value="Resize", width=200,
                                       callback=self._on_batch_op_change)
-                    dpg.add_spacer(height=8)
+                    dpg.add_spacer(height=10)
 
-                    # Per-operation sub-panels (only "Resize" visible initially)
+                    # Resize sub-panel
                     with dpg.group(tag="bop_resize"):
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Preset:", color=_CF2)
+                            dpg.add_text("Preset:", color=_CF2, indent=16)
                             dpg.add_spacer(width=8)
                             dpg.add_combo(tag="b_res_preset",
                                           items=list(video_edit.PRESETS.keys()),
-                                          default_value="720p  (1280x720)", width=220,
+                                          default_value="720p  (1280×720)",
+                                          width=220,
                                           callback=self._on_b_preset_change)
-                        dpg.add_spacer(height=4)
+                        dpg.add_spacer(height=6)
                         with dpg.group(horizontal=True):
-                            dpg.add_text("W:", color=_CF2)
+                            dpg.add_text("W:", color=_CF2, indent=16)
                             dpg.add_input_text(tag="b_res_w",
                                                default_value="1280", width=100)
                             dpg.add_spacer(width=12)
@@ -646,7 +712,7 @@ class App:
 
                     with dpg.group(tag="bop_extract_audio"):
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Dinh dang:", color=_CF2)
+                            dpg.add_text("Định dạng:", color=_CF2)
                             dpg.add_spacer(width=8)
                             dpg.add_combo(tag="b_audio_fmt",
                                           items=["mp3","aac","wav","ogg","m4a"],
@@ -654,21 +720,22 @@ class App:
                     dpg.hide_item("bop_extract_audio")
 
                     with dpg.group(tag="bop_remove_audio"):
-                        dpg.add_text("Xoa hoan toan am thanh khoi tat ca video.",
+                        dpg.add_text("Xóa hoàn toàn âm thanh khỏi tất cả video.",
                                      color=_CF3)
                     dpg.hide_item("bop_remove_audio")
 
                     with dpg.group(tag="bop_convert"):
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Dinh dang:", color=_CF2)
+                            dpg.add_text("Định dạng:", color=_CF2)
                             dpg.add_spacer(width=8)
-                            dpg.add_combo(tag="b_conv_fmt", items=video_edit.FORMATS,
+                            dpg.add_combo(tag="b_conv_fmt",
+                                          items=video_edit.FORMATS,
                                           default_value="mp4", width=120)
                     dpg.hide_item("bop_convert")
 
                     with dpg.group(tag="bop_speed"):
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Toc do (0.25-4.0):", color=_CF2)
+                            dpg.add_text("Tốc độ (0.25–4.0):", color=_CF2)
                             dpg.add_spacer(width=8)
                             dpg.add_input_text(tag="b_speed",
                                                default_value="2.00", width=100)
@@ -688,16 +755,18 @@ class App:
                     with dpg.group(tag="bop_logo"):
                         with dpg.group(horizontal=True):
                             dpg.add_input_text(tag="b_logo_path", width=-120,
-                                               hint="Chon file logo...")
-                            dpg.add_button(label="Browse...", width=112,
+                                               hint="Chọn file logo...")
+                            dpg.add_button(label="Duyệt...", width=110,
                                            callback=self._b_browse_logo)
-                        dpg.add_spacer(height=4)
+                        dpg.add_spacer(height=6)
                         with dpg.group(horizontal=True):
-                            dpg.add_text("Vi tri:", color=_CF2)
+                            dpg.add_text("Vị trí:", color=_CF2)
                             dpg.add_spacer(width=8)
                             dpg.add_combo(tag="b_logo_pos",
-                                          items=list(video_edit.LOGO_POSITIONS.keys()),
+                                          items=list(
+                                              video_edit.LOGO_POSITIONS.keys()),
                                           default_value="Bottom-Right", width=180)
+                        dpg.add_spacer(height=4)
                         with dpg.group(horizontal=True):
                             dpg.add_text("Scale:", color=_CF2)
                             dpg.add_input_text(tag="b_logo_scale",
@@ -708,39 +777,40 @@ class App:
                                                default_value="1.00", width=90)
                     dpg.hide_item("bop_logo")
 
-                dpg.add_spacer(height=10)
-                batch_btn = dpg.add_button(label="  ▶   Apply to All  ",
+                dpg.add_spacer(height=12)
+                batch_btn = dpg.add_button(label="Áp dụng tất cả",
                                            tag="batch_btn",
-                                           width=-12, height=46, indent=12,
+                                           width=-16, height=44, indent=16,
                                            callback=self._apply_batch)
                 dpg.bind_item_theme(batch_btn, "th_accent")
                 if dpg.does_item_exist("f_bold"):
                     dpg.bind_item_font(batch_btn, "f_bold")
+                dpg.add_spacer(height=8)
+                dpg.add_progress_bar(tag="batch_prog", width=-16, height=5,
+                                     indent=16, default_value=0.0)
                 dpg.add_spacer(height=6)
-                dpg.add_progress_bar(tag="batch_prog", width=-12, height=6,
-                                     indent=12, default_value=0.0)
-                dpg.add_spacer(height=4)
-                dpg.add_text("", tag="batch_status", color=_CF2, indent=12)
+                dpg.add_text("", tag="batch_status", color=_CF2, indent=16)
 
     # ── Log panel ──────────────────────────────────────────────────────────────
     def _build_log_panel(self, h: int):
         with dpg.child_window(tag="log_panel", width=_LOG_W, height=h,
                               border=False, no_scrollbar=True):
             dpg.bind_item_theme("log_panel", "th_sidebar")
-            dpg.add_spacer(height=8)
-            t = dpg.add_text("  Activity Log", indent=8)
+            dpg.add_spacer(height=12)
+            t = dpg.add_text("Activity Log", indent=12)
             if dpg.does_item_exist("f_bold"):
                 dpg.bind_item_font(t, "f_bold")
+            dpg.add_spacer(height=6)
             dpg.add_separator()
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=6)
             with dpg.child_window(tag="log_content", width=_LOG_W - 16,
-                                  height=h - 82, border=False, indent=8):
+                                  height=h - 94, border=False, indent=8):
                 dpg.bind_item_theme("log_content", "th_log")
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=6)
             with dpg.group(horizontal=True, indent=8):
-                dpg.add_text("", tag="status_txt", color=_CF2)
-                dpg.add_spacer(width=-72)
-                clr = dpg.add_button(label="Clear", width=64,
+                dpg.add_text("", tag="status_txt", color=_CF2,
+                             wrap=_LOG_W - 100)
+                clr = dpg.add_button(label="Xóa log", width=68,
                                      callback=self._clear_log)
                 dpg.bind_item_theme(clr, "th_accent")
 
@@ -750,6 +820,40 @@ class App:
             try:
                 text, color = self._log_queue.get_nowait()
                 self._add_log_entry(text, color)
+            except queue.Empty:
+                break
+        # Process pending dialog results (from worker threads)
+        while not self._dlg_queue.empty():
+            try:
+                mode, target, res = self._dlg_queue.get_nowait()
+                if not res:
+                    continue
+                if mode in ('open', 'save', 'dir'):
+                    try:
+                        dpg.set_value(target, res)
+                    except Exception:
+                        pass
+                elif mode == 'open_multi':
+                    try:
+                        new_files = list(res)
+                        if target == '__merge__':
+                            # add to app-side list, sync to listbox
+                            for f in new_files:
+                                if f not in self._merge_items:
+                                    self._merge_items.append(f)
+                            dpg.configure_item("merge_list",
+                                               items=list(self._merge_items))
+                        elif target == '__batch__':
+                            for f in new_files:
+                                if f not in self._batch_items:
+                                    self._batch_items.append(f)
+                            dpg.configure_item("batch_list",
+                                               items=list(self._batch_items))
+                        else:
+                            # generic listbox fallback
+                            dpg.configure_item(target, items=new_files)
+                    except Exception:
+                        pass
             except queue.Empty:
                 break
         if dpg.is_dearpygui_running():
@@ -797,7 +901,7 @@ class App:
         dpg.set_item_height("content_host", vh)
         dpg.set_item_height("log_panel",    vh)
         dpg.set_item_width("log_content",   _LOG_W - 16)
-        dpg.set_item_height("log_content",  vh - 82)
+        dpg.set_item_height("log_content",  vh - 94)
 
         for pg in ["pg_dl", "pg_edit", "pg_batch"]:
             dpg.set_item_width(pg, cw)
@@ -807,24 +911,52 @@ class App:
             dpg.set_item_height(sc, vh - _HDR_H)
 
     # ── File dialog helpers ────────────────────────────────────────────────────
+    # ── File dialog helpers (run dialogs in worker threads and post results back)
+    def _start_dialog_thread(self, mode: str, target: str, filetypes=None):
+        """Start a thread that creates its own Tk root and runs a dialog.
+
+        mode: 'open', 'open_multi', 'save', 'dir'
+        target: the dpg item tag to set (or listbox tag)
+        filetypes: optional filetypes for file dialogs
+        """
+        def _worker():
+            import tkinter as tk
+            from tkinter import filedialog as fd
+
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                if mode == 'open':
+                    res = fd.askopenfilename(parent=root, filetypes=filetypes)
+                elif mode == 'open_multi':
+                    res = fd.askopenfilenames(parent=root, filetypes=filetypes)
+                elif mode == 'save':
+                    res = fd.asksaveasfilename(parent=root, filetypes=filetypes)
+                elif mode == 'dir':
+                    res = fd.askdirectory(parent=root)
+                else:
+                    res = None
+            except Exception:
+                res = None
+            finally:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+
+            # Push result to dlg queue for main thread to apply
+            self._dlg_queue.put((mode, target, res))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _browse_dir(self, target: str):
-        _tk_root.update()
-        d = _fdlg.askdirectory()
-        if d:
-            dpg.set_value(target, d)
+        self._start_dialog_thread('dir', target)
 
     def _browse_file_single(self, target: str, filetypes):
-        _tk_root.update()
-        f = _fdlg.askopenfilename(filetypes=filetypes)
-        if f:
-            dpg.set_value(target, f)
+        self._start_dialog_thread('open', target, filetypes)
 
     def _browse_files_to_list(self, listbox: str, filetypes):
-        _tk_root.update()
-        files = _fdlg.askopenfilenames(filetypes=filetypes)
-        if files:
-            cur = list(dpg.get_item_configuration(listbox).get("items", []))
-            dpg.configure_item(listbox, items=cur + list(files))
+        self._start_dialog_thread('open_multi', listbox, filetypes)
 
     def _browse_edit_in(self):
         self._browse_file_single("edit_in",
@@ -832,13 +964,10 @@ class App:
              ("All files",   "*.*")])
 
     def _browse_edit_out(self):
-        _tk_root.update()
-        f = _fdlg.asksaveasfilename(
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm"),
-                       ("Audio files", "*.mp3 *.aac *.wav *.ogg *.m4a"),
-                       ("All files",   "*.*")])
-        if f:
-            dpg.set_value("edit_out", f)
+        self._start_dialog_thread('save', 'edit_out',
+            [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm"),
+             ("Audio files", "*.mp3 *.aac *.wav *.ogg *.m4a"),
+             ("All files",   "*.*")])
 
     def _browse_logo(self):
         self._browse_file_single("logo_path",
@@ -894,40 +1023,49 @@ class App:
 
     # ── Merge list helpers ─────────────────────────────────────────────────────
     def _merge_add(self):
-        self._browse_files_to_list("merge_list",
+        self._start_dialog_thread(
+            'open_multi', '__merge__',
             [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
              ("All files",   "*.*")])
 
     def _merge_remove(self):
-        items    = list(dpg.get_item_configuration("merge_list").get("items", []))
         selected = dpg.get_value("merge_list")
-        if selected in items:
-            items.remove(selected)
-            dpg.configure_item("merge_list", items=items)
+        if selected in self._merge_items:
+            self._merge_items.remove(selected)
+            dpg.configure_item("merge_list", items=list(self._merge_items))
+
+    def _merge_clear(self):
+        self._merge_items.clear()
+        dpg.configure_item("merge_list", items=[])
 
     def _merge_move(self, direction: int):
-        items    = list(dpg.get_item_configuration("merge_list").get("items", []))
         selected = dpg.get_value("merge_list")
-        if selected not in items:
+        if selected not in self._merge_items:
             return
-        idx = items.index(selected)
+        idx = self._merge_items.index(selected)
         nb  = idx + direction
-        if 0 <= nb < len(items):
-            items[idx], items[nb] = items[nb], items[idx]
-            dpg.configure_item("merge_list", items=items)
-            dpg.set_value("merge_list", items[nb])
+        if 0 <= nb < len(self._merge_items):
+            self._merge_items[idx], self._merge_items[nb] = \
+                self._merge_items[nb], self._merge_items[idx]
+            dpg.configure_item("merge_list", items=list(self._merge_items))
+            dpg.set_value("merge_list", self._merge_items[nb])
 
+    # ── Batch list helpers ─────────────────────────────────────────────────────
     def _batch_add_files(self):
-        self._browse_files_to_list("batch_list",
+        self._start_dialog_thread(
+            'open_multi', '__batch__',
             [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
              ("All files",   "*.*")])
 
-    def _batch_remove_files(self):
-        items    = list(dpg.get_item_configuration("batch_list").get("items", []))
+    def _batch_remove_file(self):
         selected = dpg.get_value("batch_list")
-        if selected in items:
-            items.remove(selected)
-            dpg.configure_item("batch_list", items=items)
+        if selected in self._batch_items:
+            self._batch_items.remove(selected)
+            dpg.configure_item("batch_list", items=list(self._batch_items))
+
+    def _batch_clear(self):
+        self._batch_items.clear()
+        dpg.configure_item("batch_list", items=[])
 
     # ── Download logic ─────────────────────────────────────────────────────────
     def start_download(self):
@@ -937,12 +1075,12 @@ class App:
         if mode == "Single Video":
             url = dpg.get_value("url_single").strip()
             if not url:
-                self._log("Vui long nhap URL video.", "err"); return
+                self._log("Vui lòng nhập URL video.", "err"); return
             targets = [("single", url)]
         elif mode == "Profile":
             url = dpg.get_value("url_profile").strip()
             if not url:
-                self._log("Vui long nhap URL profile.", "err"); return
+                self._log("Vui lòng nhập URL profile.", "err"); return
             mv    = dpg.get_value("max_videos").strip()
             max_v = int(mv) if mv.isdigit() else None
             targets = [("profile", (url, max_v))]
@@ -950,41 +1088,47 @@ class App:
             raw  = dpg.get_value("multi_text")
             urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             if not urls:
-                self._log("Vui long nhap it nhat mot URL.", "err"); return
+                self._log("Vui lòng nhập ít nhất một URL.", "err"); return
             targets = [("multi", urls)]
 
         if not os.path.exists(out):
             try:
                 os.makedirs(out)
             except Exception as e:
-                self._log(f"Khong the tao thu muc: {e}", "err"); return
+                self._log(f"Không thể tạo thư mục: {e}", "err"); return
 
         dpg.configure_item("dl_btn", enabled=False)
         dpg.set_value("dl_prog", 0.0)
-        threading.Thread(target=self._worker, args=(targets, out), daemon=True).start()
+        threading.Thread(target=self._worker, args=(targets, out),
+                         daemon=True).start()
 
     def _worker(self, targets, out):
         try:
             for kind, payload in targets:
                 if kind == "single":
-                    self._log(f"Dang tai: {payload}", "info")
+                    self._log(f"Đang tải: {payload}", "info")
                     fn = download_tiktok_video(payload, out)
-                    self._log(f"Hoan thanh: {fn}" if fn else f"That bai: {payload}",
-                              "ok" if fn else "err")
+                    self._log(
+                        f"Hoàn thành: {fn}" if fn else f"Thất bại: {payload}",
+                        "ok" if fn else "err")
                 elif kind == "profile":
                     url, max_v = payload
-                    self._log(f"Dang tai profile: {url}", "info")
+                    self._log(f"Đang tải profile: {url}", "info")
                     ok = download_from_profile(url, out, max_v)
-                    self._log("Tai profile hoan thanh." if ok else "Tai profile that bai.",
-                              "ok" if ok else "err")
+                    self._log(
+                        "Tải profile hoàn thành." if ok
+                        else "Tải profile thất bại.",
+                        "ok" if ok else "err")
                 else:
                     for url in payload:
-                        self._log(f"Dang tai: {url}", "info")
+                        self._log(f"Đang tải: {url}", "info")
                         fn = download_tiktok_video(url, out)
-                        self._log(f"Hoan thanh: {fn}" if fn else f"That bai: {url}",
-                                  "ok" if fn else "err")
+                        self._log(
+                            f"Hoàn thành: {fn}" if fn
+                            else f"Thất bại: {url}",
+                            "ok" if fn else "err")
         except Exception as e:
-            self._log(f"Loi: {e}", "err")
+            self._log(f"Lỗi: {e}", "err")
         finally:
             try:
                 dpg.configure_item("dl_btn", enabled=True)
@@ -996,10 +1140,9 @@ class App:
     def _apply_edit(self):
         inp = dpg.get_value("edit_in").strip()
         if not inp or not os.path.isfile(inp):
-            self._log("Vui long chon file video hop le.", "err"); return
-        out      = dpg.get_value("edit_out").strip() or None
-        tab_uuid = dpg.get_value("op_tabs")
-        tab      = dpg.get_item_label(tab_uuid) if dpg.does_item_exist(tab_uuid) else ""
+            self._log("Vui lòng chọn file video hợp lệ.", "err"); return
+        out = dpg.get_value("edit_out").strip() or None
+        tab = self._current_edit_tab   # reliable — updated by tab_bar callback
 
         dpg.configure_item("edit_btn", enabled=False)
         dpg.set_value("edit_prog", 0.0)
@@ -1016,49 +1159,59 @@ class App:
                 mode = dpg.get_value("audio_mode")
                 if "Extract" in mode:
                     fmt = dpg.get_value("audio_fmt")
-                    self._log(f"Extract audio ({fmt}): {os.path.basename(inp)}", "info")
+                    self._log(
+                        f"Extract audio ({fmt}): {os.path.basename(inp)}",
+                        "info")
                     result = video_edit.extract_audio(inp, fmt, out)
                 else:
                     self._log(f"Remove audio: {os.path.basename(inp)}", "info")
                     result = video_edit.remove_audio(inp, out)
             elif "Convert" in tab:
                 fmt = dpg.get_value("conv_fmt")
-                self._log(f"Convert -> {fmt}: {os.path.basename(inp)}", "info")
+                self._log(
+                    f"Convert -> {fmt}: {os.path.basename(inp)}", "info")
                 result = video_edit.convert_format(inp, fmt, out)
             elif "Speed" in tab:
-                try:   speed = float(dpg.get_value("spd_val"))
-                except ValueError: speed = 1.0
+                try:
+                    speed = float(dpg.get_value("spd_val"))
+                except ValueError:
+                    speed = 1.0
                 self._log(f"Speed {speed}x: {os.path.basename(inp)}", "info")
                 result = video_edit.speed_video(inp, speed, out)
             elif "Rotate" in tab:
                 rot = dpg.get_value("rot_choice")
-                self._log(f"Rotate ({rot}): {os.path.basename(inp)}", "info")
+                self._log(
+                    f"Rotate ({rot}): {os.path.basename(inp)}", "info")
                 result = video_edit.rotate_video(inp, rot, out)
             elif "Merge" in tab:
-                paths = list(dpg.get_item_configuration("merge_list").get("items", []))
+                paths = list(self._merge_items)
                 if not paths:
-                    self._log("Merge: chua co file nao.", "err"); return
-                self._log(f"Ghep {len(paths)} file...", "info")
+                    self._log("Merge: chưa có file nào.", "err"); return
+                self._log(f"Ghép {len(paths)} file...", "info")
                 result = video_edit.merge_videos(paths, out)
             else:  # Logo
                 logo = dpg.get_value("logo_path").strip()
                 if not logo or not os.path.isfile(logo):
-                    self._log("Logo: chua chon file logo hop le.", "err"); return
+                    self._log("Logo: chưa chọn file logo hợp lệ.", "err")
+                    return
                 pos = dpg.get_value("logo_pos")
                 cx  = dpg.get_value("logo_x").strip()  or "W-w-10"
                 cy  = dpg.get_value("logo_y").strip()  or "H-h-20"
-                try:   scale = int(dpg.get_value("logo_scale"))
-                except ValueError: scale = 150
+                try:
+                    scale = int(dpg.get_value("logo_scale"))
+                except ValueError:
+                    scale = 150
                 try:
                     opacity = float(dpg.get_value("logo_opacity"))
                     opacity = max(0.0, min(1.0, opacity))
-                except ValueError: opacity = 1.0
+                except ValueError:
+                    opacity = 1.0
                 self._log(f"Logo ({pos}): {os.path.basename(inp)}", "info")
                 result = video_edit.add_logo(inp, logo, pos, cx, cy,
                                              scale, opacity, out)
-            self._log(f"Hoan thanh: {result}", "ok")
+            self._log(f"Hoàn thành: {result}", "ok")
         except Exception as e:
-            self._log(f"Loi edit: {e}", "err")
+            self._log(f"Lỗi edit: {e}", "err")
         finally:
             try:
                 dpg.configure_item("edit_btn", enabled=True)
@@ -1068,20 +1221,21 @@ class App:
 
     # ── Batch logic ────────────────────────────────────────────────────────────
     def _apply_batch(self):
-        files = list(dpg.get_item_configuration("batch_list").get("items", []))
+        files = list(self._batch_items)
         if not files:
-            self._log("Chua co file nao trong danh sach.", "err"); return
+            self._log("Chưa có file nào trong danh sách.", "err"); return
         op      = dpg.get_value("batch_op")
         out_dir = dpg.get_value("batch_out").strip()
         if out_dir and not os.path.exists(out_dir):
             try:
                 os.makedirs(out_dir)
             except Exception as e:
-                self._log(f"Khong the tao thu muc: {e}", "err"); return
+                self._log(f"Không thể tạo thư mục: {e}", "err"); return
         dpg.configure_item("batch_btn", enabled=False)
         dpg.set_value("batch_prog", 0.0)
         threading.Thread(target=self._batch_worker,
-                         args=(list(files), op, out_dir), daemon=True).start()
+                         args=(list(files), op, out_dir),
+                         daemon=True).start()
 
     def _batch_worker(self, files: list, op: str, out_dir: str):
         ok_count = err_count = 0
@@ -1094,14 +1248,16 @@ class App:
 
                 def _out(suffix: str, ext: str = "",
                          _b=base, _e=ex, _s=src_dir) -> str:
-                    return os.path.join(out_dir or _s, f"{_b}_{suffix}{ext or _e}")
+                    return os.path.join(out_dir or _s,
+                                        f"{_b}_{suffix}{ext or _e}")
 
                 try:
                     self._log(f"[{i+1}/{total}] {op}: {name}", "info")
                     if op == "Resize":
                         w, h = (int(dpg.get_value("b_res_w")),
                                 int(dpg.get_value("b_res_h")))
-                        result = video_edit.resize_video(inp, w, h, _out(f"{w}x{h}"))
+                        result = video_edit.resize_video(
+                            inp, w, h, _out(f"{w}x{h}"))
                     elif op == "Extract Audio":
                         fmt    = dpg.get_value("b_audio_fmt")
                         result = video_edit.extract_audio(
@@ -1113,52 +1269,60 @@ class App:
                         result = video_edit.convert_format(
                             inp, fmt, _out("converted", f".{fmt}"))
                     elif op == "Speed":
-                        try:   speed = float(dpg.get_value("b_speed"))
-                        except ValueError: speed = 1.0
-                        result = video_edit.speed_video(inp, speed,
-                                                         _out(f"speed{speed}"))
+                        try:
+                            speed = float(dpg.get_value("b_speed"))
+                        except ValueError:
+                            speed = 1.0
+                        result = video_edit.speed_video(
+                            inp, speed, _out(f"speed{speed}"))
                     elif op == "Rotate":
                         result = video_edit.rotate_video(
-                            inp, dpg.get_value("b_rotate"), _out("rotated"))
+                            inp, dpg.get_value("b_rotate"),
+                            _out("rotated"))
                     elif op == "Logo":
                         logo = dpg.get_value("b_logo_path").strip()
                         if not logo or not os.path.isfile(logo):
-                            self._log(f"  X Logo khong hop le: {name}", "err")
+                            self._log(
+                                f"  ✗ Logo không hợp lệ: {name}", "err")
                             err_count += 1; continue
                         pos = dpg.get_value("b_logo_pos")
-                        try:   scale = int(dpg.get_value("b_logo_scale"))
-                        except ValueError: scale = 150
+                        try:
+                            scale = int(dpg.get_value("b_logo_scale"))
+                        except ValueError:
+                            scale = 150
                         try:
                             opacity = float(dpg.get_value("b_logo_opacity"))
                             opacity = max(0.0, min(1.0, opacity))
-                        except ValueError: opacity = 1.0
+                        except ValueError:
+                            opacity = 1.0
                         result = video_edit.add_logo(
                             inp, logo, pos, "W-w-10", "H-h-20",
                             scale, opacity, _out("logo"))
                     else:
                         result = inp
-                    self._log(f"  OK -> {os.path.basename(result)}", "ok")
+                    self._log(
+                        f"  ✓ {os.path.basename(result)}", "ok")
                     ok_count += 1
                 except Exception as e:
-                    self._log(f"  X Loi: {e}", "err")
+                    self._log(f"  ✗ Lỗi: {e}", "err")
                     err_count += 1
                 finally:
                     try:
                         dpg.set_value("batch_prog", (i + 1) / total)
                         dpg.set_value("batch_status",
                                       f"{i+1}/{total}  —  OK {ok_count}"
-                                      f"   X {err_count}")
+                                      f"   ✗ {err_count}")
                     except Exception:
                         pass
         finally:
             try:
                 dpg.configure_item("batch_btn", enabled=True)
                 self._log(
-                    f"Batch xong: {ok_count}/{total} thanh cong,"
-                    f" {err_count} loi.",
+                    f"Batch xong: {ok_count}/{total} thành công,"
+                    f" {err_count} lỗi.",
                     "ok" if err_count == 0 else "err")
                 dpg.set_value("batch_status",
-                              f"Xong — OK {ok_count}   X {err_count}"
+                              f"Xong — OK {ok_count}   ✗ {err_count}"
                               f"   / {total} file")
             except Exception:
                 pass
