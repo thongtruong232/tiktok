@@ -63,6 +63,12 @@ class App:
         self._current_dl_platform: str      = "tiktok"   # tracks active download platform
         self._merge_items: list[str]        = []          # merge listbox items
         self._batch_items: list[str]        = []          # batch listbox items
+        # ── Library state ─────────────────────────────────────────────────
+        self._lib_root: str                 = os.path.abspath("downloads")
+        self._lib_folders: list[str]        = []          # sub-folder names
+        self._lib_current_folder: str       = ""          # currently selected folder
+        self._lib_files: list[dict]         = []          # cached file info dicts
+        self._lib_selected: set[int]        = set()       # indices of selected rows
 
     # ─────────────────────────────────────────────────────────────────────────
     def _load_window_config(self):
@@ -336,6 +342,7 @@ class App:
             # ── Navigation buttons ───────────────────────────────────────────
             for page_id, label in [
                 ("download", "Tải Video"),
+                ("library",  "Thư Viện"),
                 ("edit",     "Chỉnh Sửa"),
                 ("batch",    "Batch Edit"),
             ]:
@@ -366,6 +373,7 @@ class App:
                               border=False, no_scrollbar=True):
             dpg.bind_item_theme("content_host", "th_main")
             self._build_download_page(w, h)
+            self._build_library_page(w, h)
             self._build_edit_page(w, h)
             self._build_batch_page(w, h)
 
@@ -610,6 +618,391 @@ class App:
                 dpg.set_value(tag, text)
         except Exception:
             pass
+
+    # ── Library page ───────────────────────────────────────────────────────────
+    def _build_library_page(self, w: int, h: int):
+        _FOLDER_PNL_W = 260   # left folder panel width
+
+        with dpg.child_window(tag="pg_lib", width=w, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("pg_lib", "th_main")
+            dpg.hide_item("pg_lib")
+            self._pages["library"] = "pg_lib"
+            self._hdr("Thư Viện",
+                      "Quản lý video đã tải về")
+
+            with dpg.child_window(tag="lib_scroll", width=w, height=h - _HDR_H,
+                                  border=False, no_scrollbar=True):
+                dpg.bind_item_theme("lib_scroll", "th_main")
+                dpg.add_spacer(height=8)
+
+                # ── Top bar: path display + edit ──────────────────────────────
+                with dpg.child_window(height=50, border=True, indent=12):
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("ĐƯỜNG DẪN LƯU TRÊN MÁY TÍNH",
+                                     color=_CF2, indent=8)
+                        dpg.add_spacer(width=12)
+                        dpg.add_input_text(tag="lib_root_input",
+                                           default_value=self._lib_root,
+                                           width=400, on_enter=True,
+                                           callback=self._lib_set_root)
+                        dpg.add_spacer(width=6)
+                        dpg.add_button(label="Duyệt...", width=80,
+                                       callback=self._lib_browse_root)
+                        dpg.add_spacer(width=6)
+                        dpg.add_button(label="Mở", width=50,
+                                       callback=self._lib_open_root)
+
+                dpg.add_spacer(height=8)
+
+                # ── Main body: folder panel (left) + file table (right) ───────
+                with dpg.group(horizontal=True):
+
+                    # ── Left: Folder panel ────────────────────────────────────
+                    with dpg.child_window(tag="lib_folder_panel",
+                                          width=_FOLDER_PNL_W, height=-4,
+                                          border=True):
+                        dpg.add_spacer(height=6)
+                        with dpg.group(horizontal=True, indent=8):
+                            t = dpg.add_text("THƯ MỤC")
+                            if dpg.does_item_exist("f_bold"):
+                                dpg.bind_item_font(t, "f_bold")
+                            dpg.add_spacer(width=40)
+                            btn_new = dpg.add_button(
+                                label="+ Thêm mới", width=110,
+                                callback=self._lib_add_folder)
+                            dpg.bind_item_theme(btn_new, "th_accent")
+                        dpg.add_spacer(height=8)
+                        dpg.add_separator()
+                        dpg.add_spacer(height=6)
+
+                        # Folder listbox (selectable list)
+                        dpg.add_child_window(tag="lib_folder_list",
+                                             height=-4, border=False)
+
+                    # ── Right: File table ─────────────────────────────────────
+                    with dpg.child_window(tag="lib_file_panel", height=-4,
+                                          border=True):
+                        dpg.add_spacer(height=6)
+
+                        # Toolbar
+                        with dpg.group(horizontal=True, indent=8):
+                            dpg.add_text("", tag="lib_file_count", color=_CF2)
+                            dpg.add_spacer(width=20)
+
+                            # Spacer to push buttons right
+                            dpg.add_spacer(width=200)
+
+                            btn_del = dpg.add_button(
+                                label="Xóa video", tag="lib_del_btn",
+                                width=100,
+                                callback=self._lib_delete_selected)
+                            dpg.bind_item_theme(btn_del, "th_accent")
+                            dpg.add_spacer(width=8)
+                            btn_upl = dpg.add_button(
+                                label="Upload", tag="lib_upload_btn",
+                                width=90,
+                                callback=self._lib_upload_files)
+
+                        dpg.add_spacer(height=6)
+                        dpg.add_separator()
+                        dpg.add_spacer(height=4)
+
+                        # File table
+                        with dpg.table(tag="lib_file_table",
+                                       header_row=True,
+                                       borders_innerH=True,
+                                       borders_outerH=True,
+                                       borders_innerV=False,
+                                       borders_outerV=False,
+                                       resizable=True,
+                                       scrollY=True,
+                                       height=-4):
+                            dpg.add_table_column(label="",       width_fixed=True,
+                                                 init_width_or_weight=30)
+                            dpg.add_table_column(label="Loại",   width_fixed=True,
+                                                 init_width_or_weight=70)
+                            dpg.add_table_column(label="Tên file")
+                            dpg.add_table_column(label="Kích thước",
+                                                 width_fixed=True,
+                                                 init_width_or_weight=90)
+                            dpg.add_table_column(label="Ngày tạo",
+                                                 width_fixed=True,
+                                                 init_width_or_weight=155)
+
+        # Populate on first show
+        self._lib_refresh_folders()
+
+    # ── Library logic ──────────────────────────────────────────────────────────
+    def _lib_set_root(self, sender=None, app_data=None):
+        """Set library root from text input or external call."""
+        new_root = dpg.get_value("lib_root_input").strip()
+        if new_root and os.path.isdir(new_root):
+            self._lib_root = os.path.abspath(new_root)
+            dpg.set_value("lib_root_input", self._lib_root)
+            self._lib_refresh_folders()
+        else:
+            self._log("Đường dẫn không hợp lệ hoặc không tồn tại.", "err")
+
+    def _lib_browse_root(self):
+        """Open a folder dialog to pick the library root."""
+        def _worker():
+            import tkinter as tk
+            from tkinter import filedialog as fd
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                d = fd.askdirectory(parent=root, initialdir=self._lib_root)
+                if d:
+                    self._dlg_queue.put(("lib_root_set", d))
+            finally:
+                root.destroy()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _lib_open_root(self):
+        if os.path.isdir(self._lib_root):
+            try:
+                os.startfile(self._lib_root)
+            except Exception:
+                pass
+
+    def _lib_refresh_folders(self):
+        """Scan _lib_root for sub-folders and rebuild the folder list panel."""
+        os.makedirs(self._lib_root, exist_ok=True)
+        self._lib_folders.clear()
+        try:
+            for entry in sorted(os.scandir(self._lib_root), key=lambda e: e.name.lower()):
+                if entry.is_dir():
+                    self._lib_folders.append(entry.name)
+        except Exception:
+            pass
+
+        # Also add the root itself as a virtual item
+        # Rebuild the UI list
+        if dpg.does_item_exist("lib_folder_list"):
+            children = dpg.get_item_children("lib_folder_list", slot=1)
+            if children:
+                for c in children:
+                    dpg.delete_item(c)
+
+            with dpg.item_handler_registry() as _:
+                pass  # placeholder; we add buttons below
+
+            parent = "lib_folder_list"
+            # Root folder button (always first)
+            self._lib_add_folder_btn(parent, ".", self._lib_root, is_root=True)
+            for fname in self._lib_folders:
+                fpath = os.path.join(self._lib_root, fname)
+                self._lib_add_folder_btn(parent, fname, fpath)
+
+        # Auto-select root
+        self._lib_select_folder(".")
+
+    def _lib_add_folder_btn(self, parent, name, path, is_root=False):
+        """Create a selectable folder button inside the folder panel."""
+        # Count files
+        vcount = acount = icount = 0
+        try:
+            for f in os.scandir(path):
+                if not f.is_file():
+                    continue
+                ext = os.path.splitext(f.name)[1].lower()
+                if ext in (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"):
+                    vcount += 1
+                elif ext in (".mp3", ".aac", ".wav", ".ogg", ".m4a", ".flac"):
+                    acount += 1
+                elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"):
+                    icount += 1
+        except Exception:
+            pass
+
+        display_name = os.path.basename(path) if not is_root else os.path.basename(self._lib_root)
+        label = f"{display_name}"
+        sub = f"  {vcount} video  ·  {icount} ảnh  ·  {acount} audio"
+
+        with dpg.group(parent=parent):
+            btn = dpg.add_button(
+                label=label, width=-4, height=30,
+                callback=lambda s, a, u: self._lib_select_folder(u),
+                user_data=name)
+            if dpg.does_item_exist("f_bold"):
+                dpg.bind_item_font(btn, "f_bold")
+            dpg.add_text(sub, color=_CF3, indent=8)
+            dpg.add_spacer(height=4)
+
+    def _lib_select_folder(self, folder_name: str):
+        """Select a folder and refresh the file table."""
+        self._lib_current_folder = folder_name
+        if folder_name == ".":
+            scan_path = self._lib_root
+        else:
+            scan_path = os.path.join(self._lib_root, folder_name)
+
+        self._lib_files.clear()
+        self._lib_selected.clear()
+
+        if os.path.isdir(scan_path):
+            try:
+                for entry in sorted(os.scandir(scan_path), key=lambda e: e.name.lower()):
+                    if not entry.is_file():
+                        continue
+                    stat = entry.stat()
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"):
+                        ftype = "VIDEO"
+                    elif ext in (".mp3", ".aac", ".wav", ".ogg", ".m4a", ".flac"):
+                        ftype = "AUDIO"
+                    elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"):
+                        ftype = "IMAGE"
+                    else:
+                        ftype = "FILE"
+                    self._lib_files.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "type": ftype,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    })
+            except Exception:
+                pass
+
+        self._lib_rebuild_table()
+
+    def _lib_rebuild_table(self):
+        """Rebuild the file table rows from _lib_files."""
+        # Clear existing rows
+        if dpg.does_item_exist("lib_file_table"):
+            children = dpg.get_item_children("lib_file_table", slot=1)
+            if children:
+                for c in children:
+                    dpg.delete_item(c)
+
+        folder_label = os.path.basename(self._lib_root) if self._lib_current_folder == "." \
+            else self._lib_current_folder
+        dpg.set_value("lib_file_count",
+                      f"{len(self._lib_files)} file của  {folder_label}")
+
+        _TYPE_COLORS = {
+            "VIDEO": (238, 29, 82, 255),
+            "AUDIO": (66, 165, 245, 255),
+            "IMAGE": (76, 175, 80, 255),
+            "FILE":  _CF2,
+        }
+
+        for idx, finfo in enumerate(self._lib_files):
+            with dpg.table_row(parent="lib_file_table"):
+                # Checkbox
+                cb = dpg.add_checkbox(
+                    callback=lambda s, a, u: self._lib_toggle_select(u, a),
+                    user_data=idx)
+
+                # Type badge
+                dpg.add_text(finfo["type"],
+                             color=_TYPE_COLORS.get(finfo["type"], _CF2))
+
+                # Filename
+                dpg.add_text(finfo["name"])
+
+                # Size
+                dpg.add_text(self._format_size(finfo["size"]), color=_CF2)
+
+                # Date
+                from datetime import datetime as _dt
+                ts = _dt.fromtimestamp(finfo["mtime"]).strftime("%H:%M:%S %d/%m/%Y")
+                dpg.add_text(ts, color=_CF2)
+
+    def _lib_toggle_select(self, idx: int, checked: bool):
+        if checked:
+            self._lib_selected.add(idx)
+        else:
+            self._lib_selected.discard(idx)
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024*1024):.2f} MB"
+        else:
+            return f"{size_bytes / (1024**3):.2f} GB"
+
+    def _lib_add_folder(self):
+        """Prompt user to create a new folder inside the library root."""
+        def _worker():
+            import tkinter as tk
+            from tkinter import simpledialog
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                name = simpledialog.askstring(
+                    "Thêm thư mục", "Tên thư mục mới:",
+                    parent=root)
+                if name and name.strip():
+                    self._dlg_queue.put(("lib_new_folder", name.strip()))
+            finally:
+                root.destroy()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _lib_delete_selected(self):
+        """Delete the selected files from disk and refresh."""
+        if not self._lib_selected:
+            self._log("Chưa chọn file nào để xóa.", "err")
+            return
+        deleted = 0
+        for idx in sorted(self._lib_selected, reverse=True):
+            if 0 <= idx < len(self._lib_files):
+                fpath = self._lib_files[idx]["path"]
+                try:
+                    os.remove(fpath)
+                    deleted += 1
+                except Exception as e:
+                    self._log(f"Không thể xóa {os.path.basename(fpath)}: {e}", "err")
+        self._log(f"Đã xóa {deleted} file.", "ok")
+        # Refresh
+        self._lib_select_folder(self._lib_current_folder)
+        self._lib_refresh_folders()
+
+    def _lib_upload_files(self):
+        """Copy video files into the current library folder via file dialog."""
+        def _worker():
+            import tkinter as tk
+            from tkinter import filedialog as fd
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                files = fd.askopenfilenames(
+                    parent=root,
+                    filetypes=[
+                        ("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
+                        ("Audio files", "*.mp3 *.aac *.wav *.ogg *.m4a"),
+                        ("All files", "*.*"),
+                    ])
+                if files:
+                    self._dlg_queue.put(("lib_upload", list(files)))
+            finally:
+                root.destroy()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _lib_process_upload(self, files: list[str]):
+        """Copy files into the current library folder."""
+        import shutil
+        if self._lib_current_folder == ".":
+            dest = self._lib_root
+        else:
+            dest = os.path.join(self._lib_root, self._lib_current_folder)
+        os.makedirs(dest, exist_ok=True)
+        copied = 0
+        for src in files:
+            try:
+                shutil.copy2(src, dest)
+                copied += 1
+            except Exception as e:
+                self._log(f"Lỗi copy {os.path.basename(src)}: {e}", "err")
+        self._log(f"Đã thêm {copied} file vào {os.path.basename(dest)}.", "ok")
+        self._lib_select_folder(self._lib_current_folder)
+        self._lib_refresh_folders()
 
     # ── Edit page ──────────────────────────────────────────────────────────────
     def _build_edit_page(self, w: int, h: int):
@@ -1019,7 +1412,30 @@ class App:
         # Process pending dialog results (from worker threads)
         while not self._dlg_queue.empty():
             try:
-                mode, target, res = self._dlg_queue.get_nowait()
+                item = self._dlg_queue.get_nowait()
+                if not item:
+                    continue
+
+                # Library-specific 2-tuple messages
+                if len(item) == 2:
+                    cmd, payload = item
+                    if cmd == "lib_root_set":
+                        self._lib_root = os.path.abspath(payload)
+                        dpg.set_value("lib_root_input", self._lib_root)
+                        self._lib_refresh_folders()
+                    elif cmd == "lib_new_folder":
+                        new_path = os.path.join(self._lib_root, payload)
+                        try:
+                            os.makedirs(new_path, exist_ok=True)
+                            self._log(f"Đã tạo thư mục: {payload}", "ok")
+                            self._lib_refresh_folders()
+                        except Exception as e:
+                            self._log(f"Không thể tạo thư mục: {e}", "err")
+                    elif cmd == "lib_upload":
+                        self._lib_process_upload(payload)
+                    continue
+
+                mode, target, res = item
                 if not res:
                     continue
                 if mode in ('open', 'save', 'dir'):
@@ -1096,10 +1512,10 @@ class App:
         dpg.set_item_width("log_content",   _LOG_W - 16)
         dpg.set_item_height("log_content",  vh - 60)
 
-        for pg in ["pg_dl", "pg_edit", "pg_batch"]:
+        for pg in ["pg_dl", "pg_lib", "pg_edit", "pg_batch"]:
             dpg.set_item_width(pg, cw)
             dpg.set_item_height(pg, vh)
-        for sc in ["dl_scroll", "edit_scroll", "batch_scroll"]:
+        for sc in ["dl_scroll", "lib_scroll", "edit_scroll", "batch_scroll"]:
             dpg.set_item_width(sc, cw)
             dpg.set_item_height(sc, vh - _HDR_H)
         
