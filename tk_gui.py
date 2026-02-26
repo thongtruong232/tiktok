@@ -5,6 +5,8 @@ import tkinter as _tk               # used ONLY for file dialogs
 from datetime import datetime
 from tkinter import filedialog as _fdlg
 
+import numpy as np
+from PIL import Image
 import dearpygui.dearpygui as dpg
 
 from tiktok_download import download_tiktok_video, download_from_profile
@@ -52,6 +54,7 @@ class App:
         self._dlg_queue: queue.Queue        = queue.Queue()
         self._log_items: list[str]          = []
         self._log_counter: int              = 0
+        self._logo_texture: str | None      = None   # logo texture tag (if loaded)
         # ── Edit / Batch state ────────────────────────────────────────────
         self._current_edit_tab: str         = "Resize"   # tracks selected tab
         self._merge_items: list[str]        = []          # merge listbox items
@@ -62,6 +65,7 @@ class App:
         dpg.create_context()
         self._setup_fonts()
         self._setup_themes()
+        self._load_logo_texture()
         dpg.create_viewport(title="TikTok Downloader",
                             width=1280, height=760,
                             min_width=980, min_height=580)
@@ -208,6 +212,26 @@ class App:
                 dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 14)
                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  14, 12)
 
+    # ── Load logo texture ──────────────────────────────────────────────────────
+    def _load_logo_texture(self):
+        """Load logo.ico and create a DPG texture for it."""
+        self._logo_texture = None
+        logo_path = os.path.join(os.path.dirname(__file__), "logo.ico")
+        if not os.path.exists(logo_path):
+            return
+        try:
+            img = Image.open(logo_path).convert("RGBA")
+            img_resized = img.resize((50, 50), Image.Resampling.LANCZOS)
+            img_array = (np.array(img_resized) / 255.0).astype(np.float32)
+            width, height = img_resized.size
+            with dpg.texture_registry():
+                self._logo_texture = dpg.add_raw_texture(
+                    width, height, img_array,
+                    format=dpg.mvFormat_Float_rgba, tag="logo_texture"
+                )
+        except Exception:
+            pass  # Silent fallback to default if logo load fails
+
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         vp_w = dpg.get_viewport_width()
@@ -233,19 +257,28 @@ class App:
 
             # ── Logo area ────────────────────────────────────────────────────
             dpg.add_spacer(height=18)
-            logo = dpg.add_button(label="D", width=50, height=50,
-                                  enabled=False,
-                                  indent=(_SIDEBAR_W - 50) // 2)
-            dpg.bind_item_theme(logo, "th_logo")
-            if dpg.does_item_exist("f_title"):
-                dpg.bind_item_font(logo, "f_title")
+            if self._logo_texture:
+                # Use image button if logo loaded successfully
+                logo = dpg.add_image_button(
+                    "logo_texture", width=50, height=50,
+                    enabled=False,
+                    indent=(_SIDEBAR_W - 50) // 2)
+                dpg.bind_item_theme(logo, "th_logo")
+            else:
+                # Fallback to text button if logo fails to load
+                logo = dpg.add_button(label="D", width=50, height=50,
+                                      enabled=False,
+                                      indent=(_SIDEBAR_W - 50) // 2)
+                dpg.bind_item_theme(logo, "th_logo")
+                if dpg.does_item_exist("f_title"):
+                    dpg.bind_item_font(logo, "f_title")
             dpg.add_spacer(height=6)
-            name_txt = dpg.add_text("Lạc trôi", color=_CF2, indent=28)
-            if dpg.does_item_exist("f_nav"):
-                dpg.bind_item_font(name_txt, "f_nav")
-            dpg.add_spacer(height=16)
-            dpg.add_separator()
-            dpg.add_spacer(height=16)
+            # name_txt = dpg.add_text("Lạc trôi", color=_CF2, indent=28)
+            # if dpg.does_item_exist("f_nav"):
+            #     dpg.bind_item_font(name_txt, "f_nav")
+            # dpg.add_spacer(height=16)
+            # dpg.add_separator()
+            # dpg.add_spacer(height=16)
 
             # ── Navigation buttons ───────────────────────────────────────────
             for page_id, label in [
