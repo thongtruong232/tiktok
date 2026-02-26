@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 block_cipher = None
 
 # Chỉ thêm ffmpeg.exe nếu file thực sự tồn tại
-_datas = collect_data_files('customtkinter')
+_datas = collect_data_files('dearpygui')
 if os.path.exists('ffmpeg.exe'):
     _datas.append(('ffmpeg.exe', '.'))
 
@@ -16,10 +16,11 @@ a = Analysis(
     datas=_datas,
     hiddenimports=[
         *collect_submodules('yt_dlp'),
-        *collect_submodules('customtkinter'),
+        *collect_submodules('dearpygui'),
         'tiktok_download',
         'video_edit',
-        'PIL',
+        'tkinter',
+        'tkinter.filedialog',
     ],
     hookspath=[],
     hooksconfig={},

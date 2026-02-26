@@ -1,1089 +1,1168 @@
 import os
+import queue
 import threading
-import tkinter as tk
+import tkinter as _tk               # used ONLY for file dialogs
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog as _fdlg
 
-import customtkinter as ctk
+import dearpygui.dearpygui as dpg
 
 from tiktok_download import download_tiktok_video, download_from_profile
 import video_edit
 
-# ── Global theme ──────────────────────────────────────────────────────────────
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
+# ── Hidden Tk root (file dialogs only) ────────────────────────────────────────
+_tk_root = _tk.Tk()
+_tk_root.withdraw()
 
-_ACCENT        = "#EE1D52"
-_ACCENT_HOVER  = "#c41644"
-_SIDEBAR_BG    = "#0d0d0d"
-_MAIN_BG       = "#181818"
-_CARD_BG       = "#212121"
-_CARD2_BG      = "#2a2a2a"
-_BORDER        = "#333333"
-_FG            = "#ffffff"
-_FG_DIM        = "#888888"
-_FG_HINT       = "#666666"
-_NAV_ACTIVE    = "#2a2a2a"
-_BTN_BG        = "#2e2e2e"
-_BTN_HOVER     = "#3a3a3a"
-_ENTRY_BG      = "#2a2a2a"
-_LOG_BG        = "#141414"
-_LOG_OK        = "#4caf50"
-_LOG_ERR       = "#ef5350"
-_LOG_INFO      = "#42a5f5"
-_LOG_TS        = "#555555"
+# ── Layout constants ───────────────────────────────────────────────────────────
+_SIDEBAR_W = 90
+_LOG_W     = 340
+_HDR_H     = 62
+_MAX_LOG   = 300   # max log lines kept in panel
 
-
-def _card(parent, **kwargs):
-    return ctk.CTkFrame(parent, fg_color=_CARD_BG, corner_radius=10,
-                        border_width=1, border_color=_BORDER, **kwargs)
-
-def _label(parent, text="", size=13, bold=False, color=_FG, **kwargs):
-    weight = "bold" if bold else "normal"
-    return ctk.CTkLabel(parent, text=text, font=("Segoe UI", size, weight),
-                        text_color=color, **kwargs)
-
-def _entry(parent, placeholder="", width=0, **kwargs):
-    kw = dict(fg_color=_ENTRY_BG, border_color=_BORDER, border_width=1,
-              corner_radius=8, font=("Segoe UI", 12), placeholder_text=placeholder)
-    if width:
-        kw["width"] = width
-    kw.update(kwargs)
-    return ctk.CTkEntry(parent, **kw)
-
-def _btn(parent, text, command=None, accent=False, width=0, **kwargs):
-    if accent:
-        kw = dict(fg_color=_ACCENT, hover_color=_ACCENT_HOVER, text_color=_FG,
-                  corner_radius=8, font=("Segoe UI", 13, "bold"))
-    else:
-        kw = dict(fg_color=_BTN_BG, hover_color=_BTN_HOVER, text_color=_FG,
-                  corner_radius=8, font=("Segoe UI", 12))
-    if width:
-        kw["width"] = width
-    kw.update(kwargs)
-    return ctk.CTkButton(parent, text=text, command=command, **kw)
-
-def _section_title(parent, text):
-    return _label(parent, text, size=11, color=_FG_DIM)
+# ── Color palette  (R, G, B, A  —  0-255) ─────────────────────────────────────
+_CA      = (238,  29,  82, 255)   # accent
+_CA_H    = (196,  22,  68, 255)   # accent hover
+_CA_ACT  = (160,  10,  48, 255)   # accent active/pressed
+_CS      = ( 13,  13,  13, 255)   # sidebar / log panel bg
+_CM      = ( 24,  24,  24, 255)   # main bg
+_CC      = ( 33,  33,  33, 255)   # card bg
+_CC2     = ( 42,  42,  42, 255)   # card2 bg
+_CB      = ( 51,  51,  51, 255)   # border
+_CF      = (255, 255, 255, 255)   # foreground
+_CF2     = (136, 136, 136, 255)   # dim foreground
+_CF3     = (102, 102, 102, 255)   # hint foreground
+_CBTN    = ( 46,  46,  46, 255)   # button bg
+_CBTN_H  = ( 58,  58,  58, 255)   # button hover
+_CL      = ( 20,  20,  20, 255)   # log bg
+_CL_OK   = ( 76, 175,  80, 255)
+_CL_ERR  = (239,  83,  80, 255)
+_CL_INFO = ( 66, 165, 245, 255)
+_CL_TS   = ( 85,  85,  85, 255)
+_CTRANS  = (  0,   0,   0,   0)
 
 
 class App:
-    def __init__(self, root):
-        self.root = root
-        root.title("TikTok Downloader")
-        root.geometry("1280x760")
-        root.minsize(980, 580)
-        root.configure(fg_color=_MAIN_BG)
+    def __init__(self):
+        self._current_page: str | None = None
+        self._pages: dict[str, str]    = {}    # page_id → child_window tag
+        self._nav_btns: dict[str, str] = {}    # page_id → button tag
+        self._log_queue: queue.Queue   = queue.Queue()
+        self._log_items: list[str]     = []
+        self._log_counter: int         = 0
 
-        root.columnconfigure(0, minsize=80,  weight=0)
-        root.columnconfigure(1, weight=1)
-        root.columnconfigure(2, minsize=340, weight=0)
-        root.rowconfigure(0, weight=1)
+    # ─────────────────────────────────────────────────────────────────────────
+    def run(self):
+        dpg.create_context()
+        self._setup_fonts()
+        self._setup_themes()
+        dpg.create_viewport(title="TikTok Downloader", width=1280, height=760,
+                            min_width=980, min_height=580)
+        dpg.setup_dearpygui()
+        self._build_ui()
+        dpg.set_primary_window("main_win", True)
+        dpg.set_viewport_resize_callback(self._on_resize)
+        dpg.show_viewport()
+        dpg.set_frame_callback(2, self._process_log_queue)   # start log pump
+        dpg.start_dearpygui()
+        dpg.destroy_context()
 
-        self._pages = {}
-        self._nav_btns = {}
+    # ── Fonts ──────────────────────────────────────────────────────────────────
+    def _setup_fonts(self):
+        reg  = "C:/Windows/Fonts/segoeui.ttf"
+        bold = "C:/Windows/Fonts/segoeuib.ttf"
+        with dpg.font_registry():
+            if os.path.exists(reg):
+                with dpg.font(reg, 14, tag="f_reg"):
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
+                    dpg.add_font_range(0x2190, 0x21FF)   # arrows ←→↑↓
+                    dpg.add_font_range(0x2700, 0x27BF)   # dingbats ✂
+                dpg.bind_font("f_reg")
+            if os.path.exists(bold):
+                with dpg.font(bold, 16, tag="f_title"):
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
+                with dpg.font(bold, 13, tag="f_bold"):
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Vietnamese)
 
-        self._build_sidebar(root)
-        self._build_content_host(root)
-        self._build_log_panel(root)
+    # ── Themes ─────────────────────────────────────────────────────────────────
+    def _setup_themes(self):
+        # ── global ──────────────────────────────────────────────────────────
+        with dpg.theme(tag="th_global"):
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg,           _CM)
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg,            _CC)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg,            _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered,     _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive,      _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_Button,             _CBTN)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered,      _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,       _CA_ACT)
+                dpg.add_theme_color(dpg.mvThemeCol_Text,               _CF)
+                dpg.add_theme_color(dpg.mvThemeCol_TextDisabled,       _CF2)
+                dpg.add_theme_color(dpg.mvThemeCol_Border,             _CB)
+                dpg.add_theme_color(dpg.mvThemeCol_BorderShadow,       _CTRANS)
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg,        _CM)
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab,      _CBTN)
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabActive, _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_Header,             _CBTN)
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered,      _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderActive,       _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_Tab,                _CBTN)
+                dpg.add_theme_color(dpg.mvThemeCol_TabHovered,         _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_TabActive,          _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg,            _CS)
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive,      _CS)
+                dpg.add_theme_color(dpg.mvThemeCol_PopupBg,            _CC)
+                dpg.add_theme_color(dpg.mvThemeCol_CheckMark,          _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab,         _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive,   _CA_H)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding,    0)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding,      8)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding,      6)
+                dpg.add_theme_style(dpg.mvStyleVar_GrabRounding,       4)
+                dpg.add_theme_style(dpg.mvStyleVar_ScrollbarRounding,  4)
+                dpg.add_theme_style(dpg.mvStyleVar_TabRounding,        6)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding,      0, 0)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,       8, 5)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,        8, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize,      10)
+        dpg.bind_theme("th_global")
+
+        # ── sidebar / log panel bg ───────────────────────────────────────────
+        with dpg.theme(tag="th_sidebar"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, _CS)
+
+        # ── main content bg ──────────────────────────────────────────────────
+        with dpg.theme(tag="th_main"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, _CM)
+
+        # ── log text area ────────────────────────────────────────────────────
+        with dpg.theme(tag="th_log"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, _CL)
+
+        # ── accent button ────────────────────────────────────────────────────
+        with dpg.theme(tag="th_accent"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CA_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CA_ACT)
+
+        # ── nav button: active ───────────────────────────────────────────────
+        with dpg.theme(tag="th_nav_on"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CC2)
+                dpg.add_theme_color(dpg.mvThemeCol_Text,          _CF)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 10)
+
+        # ── nav button: inactive ─────────────────────────────────────────────
+        with dpg.theme(tag="th_nav_off"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CTRANS)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CBTN_H)
+                dpg.add_theme_color(dpg.mvThemeCol_Text,          _CF2)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 10)
+
+        # ── logo box ─────────────────────────────────────────────────────────
+        with dpg.theme(tag="th_logo"):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button,        _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, _CA)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive,  _CA)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 12)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  12, 10)
+
+    # ── UI ─────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        vp_w = dpg.get_viewport_width()
+        vp_h = dpg.get_viewport_height()
+        cw   = vp_w - _SIDEBAR_W - _LOG_W
+
+        with dpg.window(tag="main_win", no_title_bar=True, no_move=True,
+                        no_resize=True, no_scrollbar=True,
+                        no_scroll_with_mouse=True,
+                        width=vp_w, height=vp_h):
+            with dpg.group(horizontal=True):
+                self._build_sidebar(vp_h)
+                self._build_content_host(cw, vp_h)
+                self._build_log_panel(vp_h)
+
         self._switch_page("download")
 
     # ── Sidebar ────────────────────────────────────────────────────────────────
-    def _build_sidebar(self, root):
-        sb = ctk.CTkFrame(root, fg_color=_SIDEBAR_BG, corner_radius=0, width=80)
-        sb.grid(row=0, column=0, sticky="nsew")
-        sb.grid_propagate(False)
-        sb.columnconfigure(0, weight=1)
+    def _build_sidebar(self, h: int):
+        with dpg.child_window(tag="sidebar", width=_SIDEBAR_W, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("sidebar", "th_sidebar")
+            dpg.add_spacer(height=14)
+            logo = dpg.add_button(label="▶", width=46, height=46, enabled=False,
+                                  indent=(_SIDEBAR_W - 46) // 2)
+            dpg.bind_item_theme(logo, "th_logo")
+            if dpg.does_item_exist("f_bold"):
+                dpg.bind_item_font(logo, "f_bold")
+            dpg.add_text("DowRen", color=_CF2, indent=27)
+            dpg.add_spacer(height=10)
+            dpg.add_separator()
+            dpg.add_spacer(height=10)
 
-        logo_box = ctk.CTkFrame(sb, fg_color=_ACCENT, corner_radius=12, width=46, height=46)
-        logo_box.grid(row=0, column=0, pady=(20, 0))
-        logo_box.grid_propagate(False)
-        ctk.CTkLabel(logo_box, text="▶", font=("Segoe UI", 20), text_color=_FG
-                     ).place(relx=0.5, rely=0.5, anchor="center")
-        _label(sb, "DowRen", size=8, color=_FG_DIM).grid(row=1, column=0, pady=(4, 20))
+            for page_id, icon, label in [
+                ("download", "↓",  "Tai"),
+                ("edit",     "✂",  "Edit"),
+                ("batch",    "☰",  "Batch"),
+            ]:
+                btn = dpg.add_button(
+                    label=f"{icon}\n{label}", tag=f"nav_{page_id}",
+                    width=_SIDEBAR_W - 12, height=58,
+                    callback=lambda s, a, u: self._switch_page(u),
+                    user_data=page_id, indent=6)
+                dpg.bind_item_theme(btn, "th_nav_off")
+                self._nav_btns[page_id] = f"nav_{page_id}"
+                dpg.add_spacer(height=4)
 
-        nav_items = [("download", "⬇", "Tải"), ("edit", "✂", "Edit"), ("batch", "📦", "Batch")]
-        for row_idx, (page_id, icon, label) in enumerate(nav_items, start=2):
-            frame = ctk.CTkFrame(sb, fg_color="transparent", corner_radius=10, width=68, height=64)
-            frame.grid(row=row_idx, column=0, padx=6, pady=3)
-            frame.grid_propagate(False)
-            btn = ctk.CTkButton(frame, text=f"{icon}\n{label}",
-                                command=lambda p=page_id: self._switch_page(p),
-                                fg_color="transparent", hover_color=_NAV_ACTIVE,
-                                text_color=_FG_DIM, corner_radius=10,
-                                font=("Segoe UI", 10), width=68, height=64)
-            btn.place(relx=0.5, rely=0.5, anchor="center")
-            self._nav_btns[page_id] = btn
-        sb.rowconfigure(10, weight=1)
-
-    def _switch_page(self, page_id):
-        # tkraise() chỉ thay đổi Z-order, không trigger layout reflow → chuyển trang tức thì
-        self._pages[page_id].tkraise()
-        for pid, btn in self._nav_btns.items():
-            if pid == page_id:
-                btn.configure(fg_color=_NAV_ACTIVE, text_color=_FG)
-            else:
-                btn.configure(fg_color="transparent", text_color=_FG_DIM)
+    def _switch_page(self, page_id: str):
+        if page_id == self._current_page:
+            return
+        for pid, tag in self._pages.items():
+            (dpg.show_item if pid == page_id else dpg.hide_item)(tag)
+        if self._current_page:
+            dpg.bind_item_theme(self._nav_btns[self._current_page], "th_nav_off")
+        dpg.bind_item_theme(self._nav_btns[page_id], "th_nav_on")
+        self._current_page = page_id
 
     # ── Content host ───────────────────────────────────────────────────────────
-    def _build_content_host(self, root):
-        host = ctk.CTkFrame(root, fg_color=_MAIN_BG, corner_radius=0)
-        host.grid(row=0, column=1, sticky="nsew")
-        host.columnconfigure(0, weight=1)
-        host.rowconfigure(0, weight=1)
-        self._build_download_page(host)
-        self._build_edit_page(host)
-        self._build_batch_page(host)
+    def _build_content_host(self, w: int, h: int):
+        with dpg.child_window(tag="content_host", width=w, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("content_host", "th_main")
+            self._build_download_page(w, h)
+            self._build_edit_page(w, h)
+            self._build_batch_page(w, h)
+
+    # ── Shared: page header bar ────────────────────────────────────────────────
+    def _hdr(self, title: str, subtitle: str):
+        with dpg.child_window(height=_HDR_H, border=False, no_scrollbar=True) as c:
+            dpg.bind_item_theme(c, "th_sidebar")
+            dpg.add_spacer(height=8)
+            t = dpg.add_text(title, indent=20)
+            if dpg.does_item_exist("f_title"):
+                dpg.bind_item_font(t, "f_title")
+            dpg.add_text(subtitle, color=_CF2, indent=22)
 
     # ── Download page ──────────────────────────────────────────────────────────
-    def _build_download_page(self, host):
-        page = ctk.CTkFrame(host, fg_color=_MAIN_BG, corner_radius=0)
-        page.grid(row=0, column=0, sticky="nsew")
-        page.columnconfigure(0, weight=1)
-        page.rowconfigure(1, weight=1)
-        self._pages["download"] = page
+    def _build_download_page(self, w: int, h: int):
+        with dpg.child_window(tag="pg_dl", width=w, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("pg_dl", "th_main")
+            self._pages["download"] = "pg_dl"
+            self._hdr("TikTok Downloader", "Created by thongtruong")
 
-        hdr = ctk.CTkFrame(page, fg_color=_SIDEBAR_BG, corner_radius=0, height=68)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        _label(hdr, "TikTok Downloader", size=18, bold=True
-               ).grid(row=0, column=0, padx=24, pady=(14, 1), sticky="w")
-        _label(hdr, "Created by thongtruong", size=9, color=_FG_DIM
-               ).grid(row=1, column=0, padx=26, pady=(0, 12), sticky="w")
+            with dpg.child_window(tag="dl_scroll", width=w, height=h - _HDR_H,
+                                  border=False):
+                dpg.bind_item_theme("dl_scroll", "th_main")
+                dpg.add_spacer(height=10)
 
-        scroll = ctk.CTkScrollableFrame(page, fg_color=_MAIN_BG,
-                                        scrollbar_button_color=_CARD_BG)
-        scroll.grid(row=1, column=0, sticky="nsew", padx=20, pady=16)
-        scroll.columnconfigure(0, weight=1)
+                t = dpg.add_text("Chon loai link de tai video", indent=16)
+                if dpg.does_item_exist("f_bold"):
+                    dpg.bind_item_font(t, "f_bold")
+                dpg.add_text("Ho tro: Single Video  •  Profile  •  Nhieu URLs",
+                             color=_CF2, indent=16)
+                dpg.add_spacer(height=10)
 
-        _label(scroll, "Chọn loại link để tải video", size=16, bold=True
-               ).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        _label(scroll, "Hỗ trợ: Single video  •  Profile  •  Nhiều URLs",
-               size=11, color=_FG_DIM).grid(row=1, column=0, sticky="w", pady=(0, 18))
+                # Mode selector (radio buttons styled as segmented control)
+                dpg.add_radio_button(
+                    tag="dl_mode",
+                    items=["Single Video", "Profile", "Nhieu URLs"],
+                    default_value="Single Video", horizontal=True, indent=16,
+                    callback=self._on_dl_mode_change)
+                dpg.add_spacer(height=10)
 
-        self._dl_mode_bar = ctk.CTkSegmentedButton(
-            scroll,
-            values=["  Single Video  ", "  Profile  ", "  Nhiều URLs  "],
-            command=self._on_dl_mode_change,
-            fg_color=_CARD_BG, selected_color=_ACCENT,
-            selected_hover_color=_ACCENT_HOVER,
-            unselected_color=_CARD_BG, unselected_hover_color=_BTN_HOVER,
-            text_color=_FG, font=("Segoe UI", 12), corner_radius=8)
-        self._dl_mode_bar.set("  Single Video  ")
-        self._dl_mode_bar.grid(row=2, column=0, sticky="w", pady=(0, 14))
+                # ── Single URL card ──────────────────────────────────────────
+                with dpg.child_window(tag="dl_card_single", height=88,
+                                      border=True, indent=12):
+                    dpg.add_text("VIDEO URL", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="url_single", width=-76,
+                                           hint="https://www.tiktok.com/@user/video/...")
+                        dpg.add_button(label="Dan", width=68,
+                                       callback=self._paste_single)
 
-        input_card = _card(scroll)
-        input_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        input_card.columnconfigure(0, weight=1)
+                # ── Profile card ──────────────────────────────────────────────
+                with dpg.child_window(tag="dl_card_profile", height=116,
+                                      border=True, indent=12):
+                    dpg.add_text("PROFILE URL", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    dpg.add_input_text(tag="url_profile", width=-4,
+                                       hint="https://www.tiktok.com/@username")
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("So video toi da:", color=_CF2)
+                        dpg.add_spacer(width=8)
+                        dpg.add_input_text(tag="max_videos", width=160,
+                                           hint="de trong = tat ca")
+                dpg.hide_item("dl_card_profile")
 
-        # Single URL frame
-        self._dl_single_frame = ctk.CTkFrame(input_card, fg_color="transparent")
-        self._dl_single_frame.columnconfigure(0, weight=1)
-        _section_title(self._dl_single_frame, "VIDEO URL").grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-        url_row = ctk.CTkFrame(self._dl_single_frame, fg_color="transparent")
-        url_row.grid(row=1, column=0, sticky="ew")
-        url_row.columnconfigure(0, weight=1)
-        self.url_single = _entry(url_row, placeholder="https://www.tiktok.com/@user/video/...", height=42)
-        self.url_single.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(url_row, "📋 Dán", command=self._paste_single, width=90).grid(row=0, column=1)
+                # ── Multi URL card ────────────────────────────────────────────
+                with dpg.child_window(tag="dl_card_multi", height=190,
+                                      border=True, indent=12):
+                    dpg.add_text("DANH SACH URL  (moi dong 1 link)", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    dpg.add_input_text(tag="multi_text", multiline=True,
+                                       width=-4, height=140)
+                dpg.hide_item("dl_card_multi")
 
-        # Profile frame
-        self._dl_profile_frame = ctk.CTkFrame(input_card, fg_color="transparent")
-        self._dl_profile_frame.columnconfigure(0, weight=1)
-        _section_title(self._dl_profile_frame, "PROFILE URL").grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-        self.url_profile = _entry(self._dl_profile_frame,
-                                  placeholder="https://www.tiktok.com/@username", height=42)
-        self.url_profile.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        max_row = ctk.CTkFrame(self._dl_profile_frame, fg_color="transparent")
-        max_row.grid(row=2, column=0, sticky="w")
-        _label(max_row, "Số video tối đa:", size=12).grid(row=0, column=0, padx=(0, 10))
-        self.max_videos = _entry(max_row, placeholder="để trống = tất cả", width=180, height=38)
-        self.max_videos.grid(row=0, column=1)
+                dpg.add_spacer(height=12)
 
-        # Multi URLs frame
-        self._dl_multi_frame = ctk.CTkFrame(input_card, fg_color="transparent")
-        self._dl_multi_frame.columnconfigure(0, weight=1)
-        _section_title(self._dl_multi_frame, "DANH SÁCH URL  (mỗi dòng 1 link)").grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-        self.multi_text = ctk.CTkTextbox(
-            self._dl_multi_frame, height=160, fg_color=_ENTRY_BG,
-            border_color=_BORDER, border_width=1, corner_radius=8,
-            font=("Consolas", 11), text_color=_FG)
-        self.multi_text.grid(row=1, column=0, sticky="ew")
+                # ── Output folder card ────────────────────────────────────────
+                with dpg.child_window(height=78, border=True, indent=12):
+                    dpg.add_text("THU MUC LUU VIDEO", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="dl_out", default_value="downloads",
+                                           width=-164)
+                        dpg.add_button(label="Browse", width=76,
+                                       callback=lambda: self._browse_dir("dl_out"))
+                        dpg.add_spacer(width=4)
+                        dpg.add_button(label="Mo thu muc", width=80,
+                                       callback=self._open_output)
 
-        self._dl_single_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
+                dpg.add_spacer(height=12)
+                dl_btn = dpg.add_button(label="  ▶   Bat dau tai  ", tag="dl_btn",
+                                        width=-12, height=46, indent=12,
+                                        callback=self.start_download)
+                dpg.bind_item_theme(dl_btn, "th_accent")
+                if dpg.does_item_exist("f_bold"):
+                    dpg.bind_item_font(dl_btn, "f_bold")
+                dpg.add_spacer(height=6)
+                dpg.add_progress_bar(tag="dl_prog", width=-12, height=6,
+                                     indent=12, default_value=0.0)
 
-        # Output folder
-        out_card = _card(scroll)
-        out_card.grid(row=4, column=0, sticky="ew", pady=(0, 14))
-        out_card.columnconfigure(0, weight=1)
-        oi = ctk.CTkFrame(out_card, fg_color="transparent")
-        oi.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        oi.columnconfigure(0, weight=1)
-        _section_title(oi, "THƯ MỤC LƯU VIDEO").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        or_ = ctk.CTkFrame(oi, fg_color="transparent")
-        or_.grid(row=1, column=0, sticky="ew")
-        or_.columnconfigure(0, weight=1)
-        self.out_entry = _entry(or_, placeholder="downloads", height=42)
-        self.out_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.out_entry.insert(0, "downloads")
-        btn_row = ctk.CTkFrame(or_, fg_color="transparent")
-        btn_row.grid(row=0, column=1)
-        _btn(btn_row, "📂", command=lambda: self._browse_dir(self.out_entry), width=46).pack(side="left")
-        _btn(btn_row, "📁 Mở", command=self._open_output, width=80).pack(side="left", padx=(6, 0))
-
-        self.download_btn = _btn(scroll, "▶   Bắt đầu tải",
-                                 command=self.start_download, accent=True, height=48)
-        self.download_btn.grid(row=5, column=0, sticky="ew", pady=(0, 8))
-
-        self.dl_progress = ctk.CTkProgressBar(scroll, mode="indeterminate", height=6,
-                                              corner_radius=3, progress_color=_ACCENT,
-                                              fg_color=_CARD_BG)
-        self.dl_progress.grid(row=6, column=0, sticky="ew")
-        self.dl_progress.set(0)
-
-    def _on_dl_mode_change(self, value):
-        for fr in [self._dl_single_frame, self._dl_profile_frame, self._dl_multi_frame]:
-            fr.grid_remove()
-        if value == "  Single Video  ":
-            self._dl_single_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
-        elif value == "  Profile  ":
-            self._dl_profile_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
+    def _on_dl_mode_change(self, sender, app_data):
+        for card in ["dl_card_single", "dl_card_profile", "dl_card_multi"]:
+            dpg.hide_item(card)
+        if app_data == "Single Video":
+            dpg.show_item("dl_card_single")
+        elif app_data == "Profile":
+            dpg.show_item("dl_card_profile")
         else:
-            self._dl_multi_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
+            dpg.show_item("dl_card_multi")
 
     def _paste_single(self):
         try:
-            text = self.root.clipboard_get()
-            self.url_single.delete(0, tk.END)
-            self.url_single.insert(0, text.strip())
+            _tk_root.update()
+            dpg.set_value("url_single", _tk_root.clipboard_get().strip())
         except Exception:
             pass
 
-    def _browse_dir(self, entry):
-        d = filedialog.askdirectory()
-        if d:
-            entry.delete(0, tk.END)
-            entry.insert(0, d)
-
     # ── Edit page ──────────────────────────────────────────────────────────────
-    def _build_edit_page(self, host):
-        page = ctk.CTkFrame(host, fg_color=_MAIN_BG, corner_radius=0)
-        page.grid(row=0, column=0, sticky="nsew")
-        page.columnconfigure(0, weight=1)
-        page.rowconfigure(1, weight=1)
-        self._pages["edit"] = page
+    def _build_edit_page(self, w: int, h: int):
+        with dpg.child_window(tag="pg_edit", width=w, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("pg_edit", "th_main")
+            dpg.hide_item("pg_edit")
+            self._pages["edit"] = "pg_edit"
+            self._hdr("✂  Edit Video",
+                      "Chinh sua video don le voi cac thao tac FFmpeg")
 
-        hdr = ctk.CTkFrame(page, fg_color=_SIDEBAR_BG, corner_radius=0, height=68)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        _label(hdr, "✂  Edit Video", size=18, bold=True
-               ).grid(row=0, column=0, padx=24, pady=(14, 1), sticky="w")
-        _label(hdr, "Chỉnh sửa video đơn lẻ với các thao tác FFmpeg",
-               size=9, color=_FG_DIM).grid(row=1, column=0, padx=26, pady=(0, 12), sticky="w")
+            with dpg.child_window(tag="edit_scroll", width=w, height=h - _HDR_H,
+                                  border=False):
+                dpg.bind_item_theme("edit_scroll", "th_main")
+                dpg.add_spacer(height=10)
 
-        scroll = ctk.CTkScrollableFrame(page, fg_color=_MAIN_BG,
-                                        scrollbar_button_color=_CARD_BG)
-        scroll.grid(row=1, column=0, sticky="nsew", padx=20, pady=16)
-        scroll.columnconfigure(0, weight=1)
+                # Input
+                with dpg.child_window(height=78, border=True, indent=12):
+                    dpg.add_text("FILE INPUT", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="edit_in", width=-120,
+                                           hint="Chon file video...")
+                        dpg.add_button(label="Browse...", width=112,
+                                       callback=self._browse_edit_in)
+                dpg.add_spacer(height=8)
 
-        # Input
-        in_card = _card(scroll)
-        in_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        in_card.columnconfigure(0, weight=1)
-        ii = ctk.CTkFrame(in_card, fg_color="transparent")
-        ii.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        ii.columnconfigure(0, weight=1)
-        _section_title(ii, "FILE INPUT").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        ir = ctk.CTkFrame(ii, fg_color="transparent")
-        ir.grid(row=1, column=0, sticky="ew")
-        ir.columnconfigure(0, weight=1)
-        self.edit_in = _entry(ir, placeholder="Chọn file video...", height=42)
-        self.edit_in.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(ir, "📂 Browse", command=self._browse_edit_in, width=110).grid(row=0, column=1)
+                # Op tabs
+                with dpg.tab_bar(tag="op_tabs", indent=12):
+                    with dpg.tab(label="Resize"):
+                        self._tab_resize()
+                    with dpg.tab(label="Audio"):
+                        self._tab_audio()
+                    with dpg.tab(label="Convert"):
+                        self._tab_convert()
+                    with dpg.tab(label="Speed"):
+                        self._tab_speed()
+                    with dpg.tab(label="Rotate"):
+                        self._tab_rotate()
+                    with dpg.tab(label="Merge"):
+                        self._tab_merge()
+                    with dpg.tab(label="Logo"):
+                        self._tab_logo()
 
-        # Operations tabview
-        self.op_tabview = ctk.CTkTabview(
-            scroll, fg_color=_CARD_BG, corner_radius=10,
-            segmented_button_fg_color=_CARD2_BG,
-            segmented_button_selected_color=_ACCENT,
-            segmented_button_selected_hover_color=_ACCENT_HOVER,
-            segmented_button_unselected_color=_CARD2_BG,
-            segmented_button_unselected_hover_color=_BTN_HOVER,
-            border_color=_BORDER, border_width=1, text_color=_FG)
-        self.op_tabview.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        for t in ["📐 Resize", "🎵 Audio", "🔄 Convert", "⚡ Speed", "🔁 Rotate", "🎬 Merge", "🖼 Logo"]:
-            self.op_tabview.add(t)
+                dpg.add_spacer(height=8)
 
-        self._build_edit_resize(self.op_tabview.tab("📐 Resize"))
-        self._build_edit_audio(self.op_tabview.tab("🎵 Audio"))
-        self._build_edit_convert(self.op_tabview.tab("🔄 Convert"))
-        self._build_edit_speed(self.op_tabview.tab("⚡ Speed"))
-        self._build_edit_rotate(self.op_tabview.tab("🔁 Rotate"))
-        self._build_edit_merge(self.op_tabview.tab("🎬 Merge"))
-        self._build_edit_logo(self.op_tabview.tab("🖼 Logo"))
+                # Output
+                with dpg.child_window(height=78, border=True, indent=12):
+                    dpg.add_text("FILE OUTPUT  (de trong = tu dong dat ten)", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="edit_out", width=-120,
+                                           hint="Luu tai...")
+                        dpg.add_button(label="Save As...", width=112,
+                                       callback=self._browse_edit_out)
 
-        # Output
-        out_card = _card(scroll)
-        out_card.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        out_card.columnconfigure(0, weight=1)
-        oi2 = ctk.CTkFrame(out_card, fg_color="transparent")
-        oi2.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        oi2.columnconfigure(0, weight=1)
-        _section_title(oi2, "FILE OUTPUT  (để trống = tự động đặt tên)").grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-        or2 = ctk.CTkFrame(oi2, fg_color="transparent")
-        or2.grid(row=1, column=0, sticky="ew")
-        or2.columnconfigure(0, weight=1)
-        self.edit_out = _entry(or2, placeholder="Lưu tại...", height=42)
-        self.edit_out.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(or2, "💾 Save As", command=self._browse_edit_out, width=110).grid(row=0, column=1)
+                dpg.add_spacer(height=12)
+                edit_btn = dpg.add_button(label="  ▶   Apply Edit  ", tag="edit_btn",
+                                          width=-12, height=46, indent=12,
+                                          callback=self._apply_edit)
+                dpg.bind_item_theme(edit_btn, "th_accent")
+                if dpg.does_item_exist("f_bold"):
+                    dpg.bind_item_font(edit_btn, "f_bold")
+                dpg.add_spacer(height=6)
+                dpg.add_progress_bar(tag="edit_prog", width=-12, height=6,
+                                     indent=12, default_value=0.0)
 
-        self.edit_btn = _btn(scroll, "▶   Apply Edit",
-                             command=self._apply_edit, accent=True, height=48)
-        self.edit_btn.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+    def _tab_resize(self):
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Preset:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_combo(tag="res_preset", items=list(video_edit.PRESETS.keys()),
+                          default_value="720p  (1280x720)", width=220,
+                          callback=self._on_preset_change)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Width: ", color=_CF2)
+            dpg.add_input_text(tag="res_w", default_value="1280", width=100)
+            dpg.add_spacer(width=16)
+            dpg.add_text("Height:", color=_CF2)
+            dpg.add_input_text(tag="res_h", default_value="720", width=100)
+        dpg.add_spacer(height=4)
+        dpg.add_text("Dung -1 cho mot chieu de giu ti le khung hinh.",
+                     color=_CF3, indent=16)
 
-        self.edit_progress = ctk.CTkProgressBar(scroll, mode="indeterminate", height=6,
-                                                corner_radius=3, progress_color=_ACCENT,
-                                                fg_color=_CARD_BG)
-        self.edit_progress.grid(row=4, column=0, sticky="ew")
-        self.edit_progress.set(0)
+    def _tab_audio(self):
+        dpg.add_spacer(height=8)
+        dpg.add_radio_button(tag="audio_mode",
+                             items=["Extract audio  (lay am thanh ra file rieng)",
+                                    "Remove audio   (tat tieng video)"],
+                             default_value="Extract audio  (lay am thanh ra file rieng)",
+                             indent=16)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Format:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_combo(tag="audio_fmt",
+                          items=["mp3", "aac", "wav", "ogg", "m4a"],
+                          default_value="mp3", width=120)
+        dpg.add_text("(ap dung khi extract audio)", color=_CF3, indent=16)
 
-    def _tf(self, tab):
-        f = ctk.CTkFrame(tab, fg_color="transparent")
-        f.pack(fill="both", expand=True, padx=12, pady=10)
-        f.columnconfigure(1, weight=1)
-        return f
+    def _tab_convert(self):
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Output format:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_combo(tag="conv_fmt", items=video_edit.FORMATS,
+                          default_value="mp4", width=120)
+        dpg.add_spacer(height=4)
+        dpg.add_text("FFmpeg tu chon codec phu hop cho container.",
+                     color=_CF3, indent=16)
 
-    def _build_edit_resize(self, tab):
-        f = self._tf(tab)
-        _label(f, "Preset:", size=12).grid(row=0, column=0, sticky="w", pady=4)
-        self.res_preset = ctk.CTkComboBox(f, values=list(video_edit.PRESETS.keys()),
-                                          state="readonly", width=220, fg_color=_ENTRY_BG,
-                                          border_color=_BORDER, button_color=_ACCENT,
-                                          command=self._on_preset_change, font=("Segoe UI", 12))
-        self.res_preset.set("720p  (1280×720)")
-        self.res_preset.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Width:", size=12).grid(row=1, column=0, sticky="w", pady=4)
-        self.res_w = _entry(f, width=100, height=36)
-        self.res_w.insert(0, "1280")
-        self.res_w.grid(row=1, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Height:", size=12).grid(row=2, column=0, sticky="w", pady=4)
-        self.res_h = _entry(f, width=100, height=36)
-        self.res_h.insert(0, "720")
-        self.res_h.grid(row=2, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Dùng -1 cho một chiều để giữ tỉ lệ.", size=10, color=_FG_HINT
-               ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+    def _tab_speed(self):
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Speed multiplier:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_input_text(tag="spd_val", default_value="2.00", width=100)
+        dpg.add_spacer(height=10)
+        dpg.add_text("Nhanh chon:", color=_CF2, indent=16)
+        dpg.add_spacer(height=4)
+        with dpg.group(horizontal=True, indent=16):
+            for lbl, val in [("0.5x", "0.50"), ("0.75x", "0.75"), ("1x", "1.00"),
+                              ("1.5x", "1.50"), ("2x", "2.00"), ("4x", "4.00")]:
+                dpg.add_button(label=lbl, width=56,
+                               callback=lambda s, a, u: dpg.set_value("spd_val", u),
+                               user_data=val)
+                dpg.add_spacer(width=4)
+        dpg.add_spacer(height=4)
+        dpg.add_text("< 1.0 = cham  |  > 1.0 = nhanh  |  pham vi 0.25-4.0",
+                     color=_CF3, indent=16)
 
-    def _build_edit_audio(self, tab):
-        f = self._tf(tab)
-        self.audio_mode = ctk.StringVar(value="extract")
-        ctk.CTkRadioButton(f, text="Extract audio  (lấy âm thanh ra file riêng)",
-                           variable=self.audio_mode, value="extract",
-                           fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
-                           font=("Segoe UI", 12)).grid(row=0, column=0, columnspan=2, sticky="w", pady=4)
-        ctk.CTkRadioButton(f, text="Remove audio  (tắt tiếng video)",
-                           variable=self.audio_mode, value="remove",
-                           fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
-                           font=("Segoe UI", 12)).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
-        _label(f, "Format:", size=12).grid(row=2, column=0, sticky="w", pady=(12, 4))
-        self.audio_fmt = ctk.CTkComboBox(f, values=["mp3", "aac", "wav", "ogg", "m4a"],
-                                         state="readonly", width=120, fg_color=_ENTRY_BG,
-                                         border_color=_BORDER, button_color=_ACCENT,
-                                         font=("Segoe UI", 12))
-        self.audio_fmt.set("mp3")
-        self.audio_fmt.grid(row=2, column=1, sticky="w", padx=(10, 0))
-        _label(f, "(áp dụng khi extract)", size=10, color=_FG_HINT
-               ).grid(row=3, column=0, columnspan=2, sticky="w")
+    def _tab_rotate(self):
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Rotation / Flip:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_combo(tag="rot_choice",
+                          items=list(video_edit.ROTATIONS.keys()),
+                          default_value=list(video_edit.ROTATIONS.keys())[0],
+                          width=280)
+        dpg.add_spacer(height=4)
+        dpg.add_text("Ap dung bo loc vf cua FFmpeg — video duoc re-encode.",
+                     color=_CF3, indent=16)
 
-    def _build_edit_convert(self, tab):
-        f = self._tf(tab)
-        _label(f, "Output format:", size=12).grid(row=0, column=0, sticky="w", pady=4)
-        self.conv_fmt = ctk.CTkComboBox(f, values=video_edit.FORMATS, state="readonly",
-                                        width=120, fg_color=_ENTRY_BG, border_color=_BORDER,
-                                        button_color=_ACCENT, font=("Segoe UI", 12))
-        self.conv_fmt.set("mp4")
-        self.conv_fmt.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        _label(f, "FFmpeg tự chọn codec phù hợp cho container.", size=10, color=_FG_HINT
-               ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    def _tab_merge(self):
+        dpg.add_spacer(height=8)
+        dpg.add_text("Danh sach file video:", color=_CF2, indent=16)
+        dpg.add_spacer(height=4)
+        dpg.add_listbox(tag="merge_list", items=[], width=-16, num_items=5, indent=12)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=12):
+            for lbl, cb in [("Add...",  self._merge_add),
+                             ("Remove", self._merge_remove),
+                             ("Up",     lambda: self._merge_move(-1)),
+                             ("Down",   lambda: self._merge_move(1)),
+                             ("Clear",  lambda: dpg.configure_item("merge_list", items=[]))]:
+                dpg.add_button(label=lbl, width=68, callback=cb)
+                dpg.add_spacer(width=4)
+        dpg.add_spacer(height=4)
+        dpg.add_text("Stream-copy — cuc nhanh, khong mat chat luong.",
+                     color=_CF3, indent=16)
 
-    def _build_edit_speed(self, tab):
-        f = self._tf(tab)
-        _label(f, "Speed multiplier:", size=12).grid(row=0, column=0, sticky="w", pady=4)
-        self.spd_value = _entry(f, width=100, height=36)
-        self.spd_value.insert(0, "2.00")
-        self.spd_value.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Ví dụ nhanh:", size=12).grid(row=1, column=0, sticky="w", pady=(12, 4))
-        br = ctk.CTkFrame(f, fg_color="transparent")
-        br.grid(row=2, column=0, columnspan=2, sticky="w")
-        for lbl, val in [("0.5×","0.50"),("0.75×","0.75"),("1×","1.00"),
-                          ("1.5×","1.50"),("2×","2.00"),("4×","4.00")]:
-            _btn(br, lbl, width=58,
-                 command=lambda v=val: (self.spd_value.delete(0, tk.END),
-                                       self.spd_value.insert(0, v))).pack(side="left", padx=3)
-        _label(f, "< 1.0 = chậm  |  > 1.0 = nhanh  |  phạm vi 0.25–4.0", size=10, color=_FG_HINT
-               ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    def _tab_logo(self):
+        dpg.add_spacer(height=8)
+        dpg.add_text("File logo (PNG/JPG):", color=_CF2, indent=16)
+        dpg.add_spacer(height=4)
+        with dpg.group(horizontal=True, indent=12):
+            dpg.add_input_text(tag="logo_path", width=-120, hint="Chon file logo...")
+            dpg.add_button(label="Browse...", width=112, callback=self._browse_logo)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Vi tri:", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_combo(tag="logo_pos",
+                          items=list(video_edit.LOGO_POSITIONS.keys()),
+                          default_value="Bottom-Right", width=180,
+                          callback=self._on_logo_pos_change)
+        with dpg.group(tag="logo_custom", horizontal=False, indent=16):
+            dpg.add_spacer(height=4)
+            with dpg.group(horizontal=True):
+                dpg.add_text("X:", color=_CF2)
+                dpg.add_input_text(tag="logo_x", default_value="W-w-10", width=110)
+                dpg.add_spacer(width=12)
+                dpg.add_text("Y:", color=_CF2)
+                dpg.add_input_text(tag="logo_y", default_value="H-h-20", width=110)
+        dpg.hide_item("logo_custom")
+        dpg.add_spacer(height=4)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Scale (px):", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_input_text(tag="logo_scale", default_value="150", width=100)
+        with dpg.group(horizontal=True, indent=16):
+            dpg.add_text("Opacity:  ", color=_CF2)
+            dpg.add_spacer(width=8)
+            dpg.add_input_text(tag="logo_opacity", default_value="1.00", width=100)
+        dpg.add_spacer(height=4)
+        dpg.add_text("Dung PNG co nen trong suot de logo dep nhat.",
+                     color=_CF3, indent=16)
 
-    def _build_edit_rotate(self, tab):
-        f = self._tf(tab)
-        _label(f, "Rotation / Flip:", size=12).grid(row=0, column=0, sticky="w", pady=4)
-        self.rot_choice = ctk.CTkComboBox(f, values=list(video_edit.ROTATIONS.keys()),
-                                          state="readonly", width=280, fg_color=_ENTRY_BG,
-                                          border_color=_BORDER, button_color=_ACCENT,
-                                          font=("Segoe UI", 12))
-        self.rot_choice.set(list(video_edit.ROTATIONS.keys())[0])
-        self.rot_choice.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Áp dụng bộ lọc vf của FFmpeg, video được re-encode.", size=10, color=_FG_HINT
-               ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    # ── Batch page ─────────────────────────────────────────────────────────────
+    def _build_batch_page(self, w: int, h: int):
+        with dpg.child_window(tag="pg_batch", width=w, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("pg_batch", "th_main")
+            dpg.hide_item("pg_batch")
+            self._pages["batch"] = "pg_batch"
+            self._hdr("☰  Batch Edit",
+                      "Ap dung cung mot thao tac cho nhieu video cung luc")
 
-    def _build_edit_merge(self, tab):
-        f = ctk.CTkFrame(tab, fg_color="transparent")
-        f.pack(fill="both", expand=True, padx=12, pady=10)
-        f.columnconfigure(0, weight=1)
-        _label(f, "Danh sách file video:", size=12, bold=True).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        list_bg = ctk.CTkFrame(f, fg_color=_ENTRY_BG, corner_radius=8,
-                               border_color=_BORDER, border_width=1)
-        list_bg.grid(row=1, column=0, sticky="ew")
-        list_bg.columnconfigure(0, weight=1)
-        self.merge_list = tk.Listbox(list_bg, height=6, font=("Consolas", 10),
-                                     bg=_ENTRY_BG, fg=_FG, selectbackground=_ACCENT,
-                                     relief="flat", borderwidth=0, highlightthickness=0,
-                                     activestyle="none")
-        self.merge_list.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-        sb = tk.Scrollbar(list_bg, orient="vertical", command=self.merge_list.yview, bg=_CARD_BG)
-        sb.grid(row=0, column=1, sticky="ns", pady=4)
-        self.merge_list.configure(yscrollcommand=sb.set)
-        bb = ctk.CTkFrame(f, fg_color="transparent")
-        bb.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        for text, cmd in [("Add…", self._merge_add), ("Remove", self._merge_remove),
-                          ("↑ Up", lambda: self._merge_move(-1)),
-                          ("↓ Down", lambda: self._merge_move(1)),
-                          ("Clear", lambda: self.merge_list.delete(0, tk.END))]:
-            _btn(bb, text, command=cmd, width=72).pack(side="left", padx=3)
-        _label(f, "Stream-copy — cực nhanh, không mất chất lượng.", size=10, color=_FG_HINT
-               ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+            with dpg.child_window(tag="batch_scroll", width=w, height=h - _HDR_H,
+                                  border=False):
+                dpg.bind_item_theme("batch_scroll", "th_main")
+                dpg.add_spacer(height=10)
 
-    def _build_edit_logo(self, tab):
-        f = self._tf(tab)
-        _label(f, "File logo (PNG/JPG):", size=12).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        lr = ctk.CTkFrame(f, fg_color="transparent")
-        lr.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        lr.columnconfigure(0, weight=1)
-        self.logo_path = _entry(lr, placeholder="Chọn file logo...", height=38)
-        self.logo_path.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(lr, "📂 Browse", command=self._browse_logo, width=110).grid(row=0, column=1)
-        _label(f, "Vị trí:", size=12).grid(row=2, column=0, sticky="w", pady=4)
-        self.logo_pos = ctk.CTkComboBox(f, values=list(video_edit.LOGO_POSITIONS.keys()),
-                                        state="readonly", width=180, fg_color=_ENTRY_BG,
-                                        border_color=_BORDER, button_color=_ACCENT,
-                                        font=("Segoe UI", 12), command=self._on_logo_pos_change)
-        self.logo_pos.set("Bottom-Right")
-        self.logo_pos.grid(row=2, column=1, sticky="w", padx=(10, 0))
-        self._logo_custom_frame = ctk.CTkFrame(f, fg_color="transparent")
-        self._logo_custom_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
-        _label(self._logo_custom_frame, "X:", size=12).grid(row=0, column=0, padx=(0, 4))
-        self.logo_x = _entry(self._logo_custom_frame, width=110, height=34)
-        self.logo_x.insert(0, "W-w-10")
-        self.logo_x.grid(row=0, column=1, padx=(0, 16))
-        _label(self._logo_custom_frame, "Y:", size=12).grid(row=0, column=2, padx=(0, 4))
-        self.logo_y = _entry(self._logo_custom_frame, width=110, height=34)
-        self.logo_y.insert(0, "H-h-20")
-        self.logo_y.grid(row=0, column=3)
-        self._logo_custom_frame.grid_remove()
-        _label(f, "Scale (px rộng, 0=gốc):", size=12).grid(row=4, column=0, sticky="w", pady=4)
-        self.logo_scale = _entry(f, width=100, height=36)
-        self.logo_scale.insert(0, "150")
-        self.logo_scale.grid(row=4, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Opacity (0.0–1.0):", size=12).grid(row=5, column=0, sticky="w", pady=4)
-        self.logo_opacity = _entry(f, width=100, height=36)
-        self.logo_opacity.insert(0, "1.00")
-        self.logo_opacity.grid(row=5, column=1, sticky="w", padx=(10, 0))
-        _label(f, "Dùng PNG có nền trong suốt để logo đẹp nhất.", size=10, color=_FG_HINT
-               ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                # File list
+                with dpg.child_window(height=186, border=True, indent=12):
+                    dpg.add_text("DANH SACH FILE INPUT", color=_CF2)
+                    dpg.add_spacer(height=4)
+                    dpg.add_listbox(tag="batch_list", items=[], width=-8, num_items=5)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="Add...",  width=82,
+                                       callback=self._batch_add_files)
+                        dpg.add_spacer(width=4)
+                        dpg.add_button(label="Remove",  width=82,
+                                       callback=self._batch_remove_files)
+                        dpg.add_spacer(width=4)
+                        dpg.add_button(label="Clear",   width=82,
+                                       callback=lambda: dpg.configure_item(
+                                           "batch_list", items=[]))
 
-    # ── Batch page ──────────────────────────────────────────────────────────────
-    def _build_batch_page(self, host):
-        page = ctk.CTkFrame(host, fg_color=_MAIN_BG, corner_radius=0)
-        page.grid(row=0, column=0, sticky="nsew")
-        page.columnconfigure(0, weight=1)
-        page.rowconfigure(1, weight=1)
-        self._pages["batch"] = page
+                dpg.add_spacer(height=8)
 
-        hdr = ctk.CTkFrame(page, fg_color=_SIDEBAR_BG, corner_radius=0, height=68)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        _label(hdr, "📦  Batch Edit", size=18, bold=True
-               ).grid(row=0, column=0, padx=24, pady=(14, 1), sticky="w")
-        _label(hdr, "Áp dụng cùng một thao tác cho nhiều video cùng lúc",
-               size=9, color=_FG_DIM).grid(row=1, column=0, padx=26, pady=(0, 12), sticky="w")
+                # Output dir
+                with dpg.child_window(height=78, border=True, indent=12):
+                    dpg.add_text("THU MUC OUTPUT  (de trong = cung thu muc goc)",
+                                 color=_CF2)
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_text(tag="batch_out", width=-120,
+                                           hint="Chon thu muc...")
+                        dpg.add_button(label="Browse...", width=112,
+                                       callback=lambda: self._browse_dir("batch_out"))
 
-        scroll = ctk.CTkScrollableFrame(page, fg_color=_MAIN_BG,
-                                        scrollbar_button_color=_CARD_BG)
-        scroll.grid(row=1, column=0, sticky="nsew", padx=20, pady=16)
-        scroll.columnconfigure(0, weight=1)
+                dpg.add_spacer(height=8)
 
-        # File list card
-        fc = _card(scroll)
-        fc.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        fc.columnconfigure(0, weight=1)
-        fi = ctk.CTkFrame(fc, fg_color="transparent")
-        fi.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        fi.columnconfigure(0, weight=1)
-        _section_title(fi, "DANH SÁCH FILE INPUT").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        lb_bg = ctk.CTkFrame(fi, fg_color=_ENTRY_BG, corner_radius=8,
-                             border_color=_BORDER, border_width=1)
-        lb_bg.grid(row=1, column=0, sticky="ew")
-        lb_bg.columnconfigure(0, weight=1)
-        self.batch_list = tk.Listbox(lb_bg, height=7, font=("Consolas", 10),
-                                     bg=_ENTRY_BG, fg=_FG, selectbackground=_ACCENT,
-                                     relief="flat", borderwidth=0, highlightthickness=0,
-                                     activestyle="none")
-        self.batch_list.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-        sb2 = tk.Scrollbar(lb_bg, orient="vertical", command=self.batch_list.yview, bg=_CARD_BG)
-        sb2.grid(row=0, column=1, sticky="ns", pady=4)
-        self.batch_list.configure(yscrollcommand=sb2.set)
-        bb2 = ctk.CTkFrame(fi, fg_color="transparent")
-        bb2.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        for text, cmd in [("Add…", self._batch_add_files),
-                          ("Remove", self._batch_remove_files),
-                          ("Clear", lambda: self.batch_list.delete(0, tk.END))]:
-            _btn(bb2, text, command=cmd, width=80).pack(side="left", padx=3)
+                # Operation selector
+                _BOPS = ["Resize", "Extract Audio", "Remove Audio",
+                         "Convert", "Speed", "Rotate", "Logo"]
+                with dpg.child_window(height=190, border=True, indent=12):
+                    dpg.add_text("THAO TAC AP DUNG CHO TAT CA FILE", color=_CF2)
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Chon thao tac:", color=_CF2)
+                        dpg.add_spacer(width=8)
+                        dpg.add_combo(tag="batch_op", items=_BOPS,
+                                      default_value="Resize", width=200,
+                                      callback=self._on_batch_op_change)
+                    dpg.add_spacer(height=8)
 
-        # Output dir card
-        oc = _card(scroll)
-        oc.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        oc.columnconfigure(0, weight=1)
-        oi = ctk.CTkFrame(oc, fg_color="transparent")
-        oi.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        oi.columnconfigure(0, weight=1)
-        _section_title(oi, "THƯ MỤC OUTPUT  (để trống = cùng thư mục gốc)").grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-        or3 = ctk.CTkFrame(oi, fg_color="transparent")
-        or3.grid(row=1, column=0, sticky="ew")
-        or3.columnconfigure(0, weight=1)
-        self.batch_out_dir = _entry(or3, placeholder="Chọn thư mục...", height=42)
-        self.batch_out_dir.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(or3, "📂 Browse", command=self._batch_browse_out, width=110).grid(row=0, column=1)
+                    # Per-operation sub-panels (only "Resize" visible initially)
+                    with dpg.group(tag="bop_resize"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Preset:", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_combo(tag="b_res_preset",
+                                          items=list(video_edit.PRESETS.keys()),
+                                          default_value="720p  (1280x720)", width=220,
+                                          callback=self._on_b_preset_change)
+                        dpg.add_spacer(height=4)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("W:", color=_CF2)
+                            dpg.add_input_text(tag="b_res_w",
+                                               default_value="1280", width=100)
+                            dpg.add_spacer(width=12)
+                            dpg.add_text("H:", color=_CF2)
+                            dpg.add_input_text(tag="b_res_h",
+                                               default_value="720",  width=100)
 
-        # Operation card
-        opc = _card(scroll)
-        opc.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        opc.columnconfigure(0, weight=1)
-        opi = ctk.CTkFrame(opc, fg_color="transparent")
-        opi.grid(row=0, column=0, sticky="ew", padx=16, pady=12)
-        opi.columnconfigure(0, weight=1)
-        _section_title(opi, "THAO TÁC ÁP DỤNG CHO TẤT CẢ FILE").grid(
-            row=0, column=0, sticky="w", pady=(0, 10))
-        op_row = ctk.CTkFrame(opi, fg_color="transparent")
-        op_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        _label(op_row, "Chọn thao tác:", size=12).pack(side="left", padx=(0, 10))
-        _BATCH_OPS = ["📐 Resize", "🎵 Extract Audio", "🔇 Remove Audio",
-                      "🔄 Convert", "⚡ Speed", "🔁 Rotate", "🖼 Logo"]
-        self.batch_op = ctk.CTkComboBox(op_row, values=_BATCH_OPS, state="readonly",
-                                        width=220, fg_color=_ENTRY_BG, border_color=_BORDER,
-                                        button_color=_ACCENT, font=("Segoe UI", 12),
-                                        command=self._on_batch_op_change)
-        self.batch_op.set("📐 Resize")
-        self.batch_op.pack(side="left")
+                    with dpg.group(tag="bop_extract_audio"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Dinh dang:", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_combo(tag="b_audio_fmt",
+                                          items=["mp3","aac","wav","ogg","m4a"],
+                                          default_value="mp3", width=120)
+                    dpg.hide_item("bop_extract_audio")
 
-        sh = ctk.CTkFrame(opi, fg_color="transparent")
-        sh.grid(row=2, column=0, sticky="ew")
-        sh.columnconfigure(0, weight=1)
-        sh.columnconfigure(1, weight=1)
-        self._batch_sf = {}
+                    with dpg.group(tag="bop_remove_audio"):
+                        dpg.add_text("Xoa hoan toan am thanh khoi tat ca video.",
+                                     color=_CF3)
+                    dpg.hide_item("bop_remove_audio")
 
-        def _r(parent, lbl, widget, row):
-            _label(parent, lbl, size=12).grid(row=row, column=0, sticky="w", pady=3)
-            widget.grid(row=row, column=1, sticky="w", padx=(10, 0))
+                    with dpg.group(tag="bop_convert"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Dinh dang:", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_combo(tag="b_conv_fmt", items=video_edit.FORMATS,
+                                          default_value="mp4", width=120)
+                    dpg.hide_item("bop_convert")
 
-        # Resize settings
-        f1 = ctk.CTkFrame(sh, fg_color="transparent")
-        f1.columnconfigure(1, weight=1)
-        self.b_res_preset = ctk.CTkComboBox(f1, values=list(video_edit.PRESETS.keys()),
-                                            state="readonly", width=220, fg_color=_ENTRY_BG,
-                                            border_color=_BORDER, button_color=_ACCENT,
-                                            font=("Segoe UI", 12), command=self._on_b_preset_change)
-        self.b_res_preset.set("720p  (1280×720)")
-        self.b_res_w = _entry(f1, width=100, height=34); self.b_res_w.insert(0, "1280")
-        self.b_res_h = _entry(f1, width=100, height=34); self.b_res_h.insert(0, "720")
-        _r(f1, "Preset:", self.b_res_preset, 0)
-        _r(f1, "Width:", self.b_res_w, 1)
-        _r(f1, "Height:", self.b_res_h, 2)
-        self._batch_sf["📐 Resize"] = f1
+                    with dpg.group(tag="bop_speed"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Toc do (0.25-4.0):", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_input_text(tag="b_speed",
+                                               default_value="2.00", width=100)
+                    dpg.hide_item("bop_speed")
 
-        f2 = ctk.CTkFrame(sh, fg_color="transparent"); f2.columnconfigure(1, weight=1)
-        self.b_audio_fmt = ctk.CTkComboBox(f2, values=["mp3","aac","wav","ogg","m4a"],
-                                           state="readonly", width=120, fg_color=_ENTRY_BG,
-                                           border_color=_BORDER, button_color=_ACCENT,
-                                           font=("Segoe UI", 12))
-        self.b_audio_fmt.set("mp3")
-        _r(f2, "Định dạng:", self.b_audio_fmt, 0)
-        self._batch_sf["🎵 Extract Audio"] = f2
+                    with dpg.group(tag="bop_rotate"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Rotation:", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_combo(tag="b_rotate",
+                                          items=list(video_edit.ROTATIONS.keys()),
+                                          default_value=list(
+                                              video_edit.ROTATIONS.keys())[0],
+                                          width=280)
+                    dpg.hide_item("bop_rotate")
 
-        f3 = ctk.CTkFrame(sh, fg_color="transparent")
-        _label(f3, "Xóa hoàn toàn âm thanh khỏi tất cả video đã chọn.", size=11, color=_FG_HINT
-               ).pack(anchor="w", pady=4)
-        self._batch_sf["🔇 Remove Audio"] = f3
+                    with dpg.group(tag="bop_logo"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_input_text(tag="b_logo_path", width=-120,
+                                               hint="Chon file logo...")
+                            dpg.add_button(label="Browse...", width=112,
+                                           callback=self._b_browse_logo)
+                        dpg.add_spacer(height=4)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Vi tri:", color=_CF2)
+                            dpg.add_spacer(width=8)
+                            dpg.add_combo(tag="b_logo_pos",
+                                          items=list(video_edit.LOGO_POSITIONS.keys()),
+                                          default_value="Bottom-Right", width=180)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Scale:", color=_CF2)
+                            dpg.add_input_text(tag="b_logo_scale",
+                                               default_value="150", width=90)
+                            dpg.add_spacer(width=8)
+                            dpg.add_text("Opacity:", color=_CF2)
+                            dpg.add_input_text(tag="b_logo_opacity",
+                                               default_value="1.00", width=90)
+                    dpg.hide_item("bop_logo")
 
-        f4 = ctk.CTkFrame(sh, fg_color="transparent"); f4.columnconfigure(1, weight=1)
-        self.b_conv_fmt = ctk.CTkComboBox(f4, values=video_edit.FORMATS, state="readonly",
-                                          width=120, fg_color=_ENTRY_BG, border_color=_BORDER,
-                                          button_color=_ACCENT, font=("Segoe UI", 12))
-        self.b_conv_fmt.set("mp4")
-        _r(f4, "Định dạng:", self.b_conv_fmt, 0)
-        self._batch_sf["🔄 Convert"] = f4
-
-        f5 = ctk.CTkFrame(sh, fg_color="transparent"); f5.columnconfigure(1, weight=1)
-        self.b_speed = _entry(f5, width=100, height=34); self.b_speed.insert(0, "2.00")
-        _r(f5, "Tốc độ (0.25–4.0):", self.b_speed, 0)
-        self._batch_sf["⚡ Speed"] = f5
-
-        f6 = ctk.CTkFrame(sh, fg_color="transparent"); f6.columnconfigure(1, weight=1)
-        self.b_rotate = ctk.CTkComboBox(f6, values=list(video_edit.ROTATIONS.keys()),
-                                        state="readonly", width=280, fg_color=_ENTRY_BG,
-                                        border_color=_BORDER, button_color=_ACCENT,
-                                        font=("Segoe UI", 12))
-        self.b_rotate.set(list(video_edit.ROTATIONS.keys())[0])
-        _r(f6, "Rotation:", self.b_rotate, 0)
-        self._batch_sf["🔁 Rotate"] = f6
-
-        f7 = ctk.CTkFrame(sh, fg_color="transparent"); f7.columnconfigure(1, weight=1)
-        lr7 = ctk.CTkFrame(f7, fg_color="transparent"); lr7.columnconfigure(0, weight=1)
-        lr7.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        _label(lr7, "File logo:", size=12).grid(row=0, column=0, sticky="w")
-        lr7b = ctk.CTkFrame(lr7, fg_color="transparent"); lr7b.columnconfigure(0, weight=1)
-        lr7b.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self.b_logo_path = _entry(lr7b, placeholder="Chọn file logo...", height=36)
-        self.b_logo_path.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        _btn(lr7b, "📂 Browse", command=self._b_browse_logo, width=100).grid(row=0, column=1)
-        self.b_logo_pos = ctk.CTkComboBox(f7, values=list(video_edit.LOGO_POSITIONS.keys()),
-                                          state="readonly", width=180, fg_color=_ENTRY_BG,
-                                          border_color=_BORDER, button_color=_ACCENT,
-                                          font=("Segoe UI", 12))
-        self.b_logo_pos.set("Bottom-Right")
-        self.b_logo_scale = _entry(f7, width=100, height=34); self.b_logo_scale.insert(0, "150")
-        self.b_logo_opacity = _entry(f7, width=100, height=34); self.b_logo_opacity.insert(0, "1.00")
-        _r(f7, "Vị trí:", self.b_logo_pos, 1)
-        _r(f7, "Scale (px):", self.b_logo_scale, 2)
-        _r(f7, "Opacity:", self.b_logo_opacity, 3)
-        self._batch_sf["🖼 Logo"] = f7
-
-        self._show_batch_sf("📐 Resize")
-
-        self.batch_btn = _btn(scroll, "▶   Apply to All",
-                              command=self._apply_batch, accent=True, height=48)
-        self.batch_btn.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        self.batch_progress = ctk.CTkProgressBar(scroll, mode="determinate", height=6,
-                                                 corner_radius=3, progress_color=_ACCENT,
-                                                 fg_color=_CARD_BG)
-        self.batch_progress.grid(row=4, column=0, sticky="ew", pady=(0, 4))
-        self.batch_progress.set(0)
-        self.batch_status_lbl = _label(scroll, "", size=11, color=_FG_DIM)
-        self.batch_status_lbl.grid(row=5, column=0, sticky="w")
+                dpg.add_spacer(height=10)
+                batch_btn = dpg.add_button(label="  ▶   Apply to All  ",
+                                           tag="batch_btn",
+                                           width=-12, height=46, indent=12,
+                                           callback=self._apply_batch)
+                dpg.bind_item_theme(batch_btn, "th_accent")
+                if dpg.does_item_exist("f_bold"):
+                    dpg.bind_item_font(batch_btn, "f_bold")
+                dpg.add_spacer(height=6)
+                dpg.add_progress_bar(tag="batch_prog", width=-12, height=6,
+                                     indent=12, default_value=0.0)
+                dpg.add_spacer(height=4)
+                dpg.add_text("", tag="batch_status", color=_CF2, indent=12)
 
     # ── Log panel ──────────────────────────────────────────────────────────────
-    def _build_log_panel(self, root):
-        panel = ctk.CTkFrame(root, fg_color=_SIDEBAR_BG, corner_radius=0)
-        panel.grid(row=0, column=2, sticky="nsew")
-        panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(1, weight=1)
+    def _build_log_panel(self, h: int):
+        with dpg.child_window(tag="log_panel", width=_LOG_W, height=h,
+                              border=False, no_scrollbar=True):
+            dpg.bind_item_theme("log_panel", "th_sidebar")
+            dpg.add_spacer(height=8)
+            t = dpg.add_text("  Activity Log", indent=8)
+            if dpg.does_item_exist("f_bold"):
+                dpg.bind_item_font(t, "f_bold")
+            dpg.add_separator()
+            dpg.add_spacer(height=4)
+            with dpg.child_window(tag="log_content", width=_LOG_W - 16,
+                                  height=h - 82, border=False, indent=8):
+                dpg.bind_item_theme("log_content", "th_log")
+            dpg.add_spacer(height=4)
+            with dpg.group(horizontal=True, indent=8):
+                dpg.add_text("", tag="status_txt", color=_CF2)
+                dpg.add_spacer(width=-72)
+                clr = dpg.add_button(label="Clear", width=64,
+                                     callback=self._clear_log)
+                dpg.bind_item_theme(clr, "th_accent")
 
-        hdr = ctk.CTkFrame(panel, fg_color=_SIDEBAR_BG, corner_radius=0, height=68)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        _label(hdr, "📋  Activity Log", size=14, bold=True
-               ).grid(row=0, column=0, padx=16, pady=(18, 0), sticky="w")
+    # ── Log queue pump (called every frame from render thread) ─────────────────
+    def _process_log_queue(self, *_):
+        while not self._log_queue.empty():
+            try:
+                text, color = self._log_queue.get_nowait()
+                self._add_log_entry(text, color)
+            except queue.Empty:
+                break
+        if dpg.is_dearpygui_running():
+            dpg.set_frame_callback(dpg.get_frame_count() + 1,
+                                   self._process_log_queue)
 
-        log_frame = ctk.CTkFrame(panel, fg_color=_LOG_BG, corner_radius=0)
-        log_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(6, 0))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        self.log_box = tk.Text(log_frame, state="disabled", wrap="word",
-                               font=("Consolas", 9), bg=_LOG_BG, fg=_FG,
-                               relief="flat", borderwidth=0, highlightthickness=0,
-                               padx=8, pady=6, insertbackground=_FG)
-        self.log_box.grid(row=0, column=0, sticky="nsew")
-        sb3 = tk.Scrollbar(log_frame, orient="vertical", command=self.log_box.yview, bg=_CARD_BG)
-        sb3.grid(row=0, column=1, sticky="ns")
-        self.log_box.configure(yscrollcommand=sb3.set)
-        self.log_box.tag_configure("ok",   foreground=_LOG_OK)
-        self.log_box.tag_configure("err",  foreground=_LOG_ERR)
-        self.log_box.tag_configure("info", foreground=_LOG_INFO)
-        self.log_box.tag_configure("ts",   foreground=_LOG_TS)
+    def _add_log_entry(self, text: str, color: tuple):
+        tag = f"ll_{self._log_counter}"
+        self._log_counter += 1
+        dpg.add_text(text, tag=tag, color=color,
+                     parent="log_content", wrap=_LOG_W - 36)
+        self._log_items.append(tag)
+        while len(self._log_items) > _MAX_LOG:
+            old = self._log_items.pop(0)
+            if dpg.does_item_exist(old):
+                dpg.delete_item(old)
+        dpg.set_y_scroll("log_content", dpg.get_y_scroll_max("log_content"))
 
-        btm = ctk.CTkFrame(panel, fg_color=_SIDEBAR_BG, corner_radius=0, height=44)
-        btm.grid(row=2, column=0, sticky="ew")
-        btm.grid_propagate(False)
-        btm.columnconfigure(0, weight=1)
-        self.status_var = tk.StringVar(value="Ready")
-        _label(btm, "", size=9, color=_FG_DIM, textvariable=self.status_var
-               ).grid(row=0, column=0, sticky="w", padx=14, pady=12)
-        _btn(btm, "🗑 Clear", command=self._clear_log, width=80
-             ).grid(row=0, column=1, padx=10, pady=8)
-
-    def _log(self, text, tag="info"):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log_box.configure(state="normal")
-        self.log_box.insert(tk.END, f"[{ts}] ", "ts")
-        self.log_box.insert(tk.END, text + "\n", tag)
-        self.log_box.see(tk.END)
-        self.log_box.configure(state="disabled")
-        self.status_var.set(text[:80])
+    def _log(self, text: str, tag: str = "info"):
+        ts     = datetime.now().strftime("%H:%M:%S")
+        colors = {"ok": _CL_OK, "err": _CL_ERR, "info": _CL_INFO}
+        self._log_queue.put((f"[{ts}] {text}", colors.get(tag, _CF)))
+        try:
+            dpg.set_value("status_txt", text[:55])
+        except Exception:
+            pass
 
     def _clear_log(self):
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", tk.END)
-        self.log_box.configure(state="disabled")
-        self.status_var.set("Ready")
+        for tag in self._log_items:
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        self._log_items.clear()
+        dpg.set_value("status_txt", "Ready")
 
-    # ── Shared helpers ─────────────────────────────────────────────────────────
-    def _open_output(self):
-        path = self.out_entry.get().strip() or "downloads"
-        if not os.path.exists(path):
-            messagebox.showinfo("Info", "Thư mục output chưa tồn tại.")
-            return
-        try:
-            os.startfile(path)
-        except Exception:
-            messagebox.showerror("Error", "Không thể mở thư mục.")
+    # ── Viewport resize ────────────────────────────────────────────────────────
+    def _on_resize(self):
+        vw = dpg.get_viewport_width()
+        vh = dpg.get_viewport_height()
+        cw = vw - _SIDEBAR_W - _LOG_W
 
-    def _on_preset_change(self, value):
-        w, h = video_edit.PRESETS.get(value, (None, None))
-        if w is not None:
-            self.res_w.delete(0, tk.END); self.res_w.insert(0, str(w))
-            self.res_h.delete(0, tk.END); self.res_h.insert(0, str(h))
+        dpg.set_item_width("main_win",      vw)
+        dpg.set_item_height("main_win",     vh)
+        dpg.set_item_height("sidebar",      vh)
+        dpg.set_item_width("content_host",  cw)
+        dpg.set_item_height("content_host", vh)
+        dpg.set_item_height("log_panel",    vh)
+        dpg.set_item_width("log_content",   _LOG_W - 16)
+        dpg.set_item_height("log_content",  vh - 82)
+
+        for pg in ["pg_dl", "pg_edit", "pg_batch"]:
+            dpg.set_item_width(pg, cw)
+            dpg.set_item_height(pg, vh)
+        for sc in ["dl_scroll", "edit_scroll", "batch_scroll"]:
+            dpg.set_item_width(sc, cw)
+            dpg.set_item_height(sc, vh - _HDR_H)
+
+    # ── File dialog helpers ────────────────────────────────────────────────────
+    def _browse_dir(self, target: str):
+        _tk_root.update()
+        d = _fdlg.askdirectory()
+        if d:
+            dpg.set_value(target, d)
+
+    def _browse_file_single(self, target: str, filetypes):
+        _tk_root.update()
+        f = _fdlg.askopenfilename(filetypes=filetypes)
+        if f:
+            dpg.set_value(target, f)
+
+    def _browse_files_to_list(self, listbox: str, filetypes):
+        _tk_root.update()
+        files = _fdlg.askopenfilenames(filetypes=filetypes)
+        if files:
+            cur = list(dpg.get_item_configuration(listbox).get("items", []))
+            dpg.configure_item(listbox, items=cur + list(files))
 
     def _browse_edit_in(self):
-        f = filedialog.askopenfilename(title="Chọn video input",
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
-                       ("All files", "*.*")])
-        if f:
-            self.edit_in.delete(0, tk.END); self.edit_in.insert(0, f)
+        self._browse_file_single("edit_in",
+            [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
+             ("All files",   "*.*")])
 
     def _browse_edit_out(self):
-        f = filedialog.asksaveasfilename(title="Lưu file output",
+        _tk_root.update()
+        f = _fdlg.asksaveasfilename(
             filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm"),
                        ("Audio files", "*.mp3 *.aac *.wav *.ogg *.m4a"),
-                       ("All files", "*.*")])
+                       ("All files",   "*.*")])
         if f:
-            self.edit_out.delete(0, tk.END); self.edit_out.insert(0, f)
+            dpg.set_value("edit_out", f)
 
     def _browse_logo(self):
-        f = filedialog.askopenfilename(title="Chọn file logo",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                       ("All files", "*.*")])
-        if f:
-            self.logo_path.delete(0, tk.END); self.logo_path.insert(0, f)
-
-    def _on_logo_pos_change(self, value):
-        if value == "Custom":
-            self._logo_custom_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
-        else:
-            self._logo_custom_frame.grid_remove()
-
-    def _merge_add(self):
-        files = filedialog.askopenfilenames(title="Chọn file video",
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
-                       ("All files", "*.*")])
-        for f in files:
-            self.merge_list.insert(tk.END, f)
-
-    def _merge_remove(self):
-        for idx in reversed(self.merge_list.curselection()):
-            self.merge_list.delete(idx)
-
-    def _merge_move(self, direction):
-        sel = list(self.merge_list.curselection())
-        if not sel:
-            return
-        if direction == -1 and sel[0] == 0:
-            return
-        if direction == 1 and sel[-1] == self.merge_list.size() - 1:
-            return
-        for idx in (sel if direction == 1 else reversed(sel)):
-            nb = idx + direction
-            val = self.merge_list.get(idx)
-            self.merge_list.delete(idx)
-            self.merge_list.insert(nb, val)
-            self.merge_list.selection_set(nb)
-
-    def _show_batch_sf(self, op):
-        for key, frame in self._batch_sf.items():
-            frame.grid_remove()
-        if op in self._batch_sf:
-            self._batch_sf[op].grid(row=0, column=0, columnspan=2, sticky="ew")
-
-    def _on_batch_op_change(self, value):
-        self._show_batch_sf(value)
-
-    def _on_b_preset_change(self, value):
-        w, h = video_edit.PRESETS.get(value, (None, None))
-        if w is not None:
-            self.b_res_w.delete(0, tk.END); self.b_res_w.insert(0, str(w))
-            self.b_res_h.delete(0, tk.END); self.b_res_h.insert(0, str(h))
-
-    def _batch_add_files(self):
-        files = filedialog.askopenfilenames(title="Chọn file video",
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
-                       ("All files", "*.*")])
-        for f in files:
-            self.batch_list.insert(tk.END, f)
-
-    def _batch_remove_files(self):
-        for idx in reversed(self.batch_list.curselection()):
-            self.batch_list.delete(idx)
-
-    def _batch_browse_out(self):
-        folder = filedialog.askdirectory(title="Chọn thư mục output")
-        if folder:
-            self.batch_out_dir.delete(0, tk.END); self.batch_out_dir.insert(0, folder)
+        self._browse_file_single("logo_path",
+            [("Image files", "*.png *.jpg *.jpeg *.bmp *.webp"),
+             ("All files",   "*.*")])
 
     def _b_browse_logo(self):
-        f = filedialog.askopenfilename(title="Chọn file logo",
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                       ("All files", "*.*")])
-        if f:
-            self.b_logo_path.delete(0, tk.END); self.b_logo_path.insert(0, f)
+        self._browse_file_single("b_logo_path",
+            [("Image files", "*.png *.jpg *.jpeg *.bmp *.webp"),
+             ("All files",   "*.*")])
+
+    def _open_output(self):
+        path = dpg.get_value("dl_out").strip() or "downloads"
+        if os.path.exists(path):
+            try:
+                os.startfile(path)
+            except Exception:
+                pass
+
+    # ── Edit helpers ───────────────────────────────────────────────────────────
+    def _on_preset_change(self, sender, app_data):
+        w, h = video_edit.PRESETS.get(app_data, (None, None))
+        if w:
+            dpg.set_value("res_w", str(w))
+            dpg.set_value("res_h", str(h))
+
+    def _on_logo_pos_change(self, sender, app_data):
+        if app_data == "Custom":
+            dpg.show_item("logo_custom")
+        else:
+            dpg.hide_item("logo_custom")
+
+    def _on_b_preset_change(self, sender, app_data):
+        w, h = video_edit.PRESETS.get(app_data, (None, None))
+        if w:
+            dpg.set_value("b_res_w", str(w))
+            dpg.set_value("b_res_h", str(h))
+
+    def _on_batch_op_change(self, sender, app_data):
+        op_to_group = {
+            "Resize":        "bop_resize",
+            "Extract Audio": "bop_extract_audio",
+            "Remove Audio":  "bop_remove_audio",
+            "Convert":       "bop_convert",
+            "Speed":         "bop_speed",
+            "Rotate":        "bop_rotate",
+            "Logo":          "bop_logo",
+        }
+        for g in op_to_group.values():
+            dpg.hide_item(g)
+        if app_data in op_to_group:
+            dpg.show_item(op_to_group[app_data])
+
+    # ── Merge list helpers ─────────────────────────────────────────────────────
+    def _merge_add(self):
+        self._browse_files_to_list("merge_list",
+            [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
+             ("All files",   "*.*")])
+
+    def _merge_remove(self):
+        items    = list(dpg.get_item_configuration("merge_list").get("items", []))
+        selected = dpg.get_value("merge_list")
+        if selected in items:
+            items.remove(selected)
+            dpg.configure_item("merge_list", items=items)
+
+    def _merge_move(self, direction: int):
+        items    = list(dpg.get_item_configuration("merge_list").get("items", []))
+        selected = dpg.get_value("merge_list")
+        if selected not in items:
+            return
+        idx = items.index(selected)
+        nb  = idx + direction
+        if 0 <= nb < len(items):
+            items[idx], items[nb] = items[nb], items[idx]
+            dpg.configure_item("merge_list", items=items)
+            dpg.set_value("merge_list", items[nb])
+
+    def _batch_add_files(self):
+        self._browse_files_to_list("batch_list",
+            [("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
+             ("All files",   "*.*")])
+
+    def _batch_remove_files(self):
+        items    = list(dpg.get_item_configuration("batch_list").get("items", []))
+        selected = dpg.get_value("batch_list")
+        if selected in items:
+            items.remove(selected)
+            dpg.configure_item("batch_list", items=items)
 
     # ── Download logic ─────────────────────────────────────────────────────────
     def start_download(self):
-        mode = self._dl_mode_bar.get()
-        out = self.out_entry.get().strip() or "downloads"
-        if mode == "  Single Video  ":
-            url = self.url_single.get().strip()
+        mode = dpg.get_value("dl_mode")
+        out  = dpg.get_value("dl_out").strip() or "downloads"
+
+        if mode == "Single Video":
+            url = dpg.get_value("url_single").strip()
             if not url:
-                messagebox.showwarning("Warning", "Vui lòng nhập URL video.")
-                return
+                self._log("Vui long nhap URL video.", "err"); return
             targets = [("single", url)]
-        elif mode == "  Profile  ":
-            url = self.url_profile.get().strip()
-            if not url or url == "https://www.tiktok.com/@username":
-                messagebox.showwarning("Warning", "Vui lòng nhập URL profile.")
-                return
-            mv = self.max_videos.get().strip()
+        elif mode == "Profile":
+            url = dpg.get_value("url_profile").strip()
+            if not url:
+                self._log("Vui long nhap URL profile.", "err"); return
+            mv    = dpg.get_value("max_videos").strip()
             max_v = int(mv) if mv.isdigit() else None
             targets = [("profile", (url, max_v))]
         else:
-            raw = self.multi_text.get("1.0", tk.END)
+            raw  = dpg.get_value("multi_text")
             urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             if not urls:
-                messagebox.showwarning("Warning", "Vui lòng nhập ít nhất một URL.")
-                return
+                self._log("Vui long nhap it nhat mot URL.", "err"); return
             targets = [("multi", urls)]
+
         if not os.path.exists(out):
             try:
                 os.makedirs(out)
             except Exception as e:
-                messagebox.showerror("Error", f"Không thể tạo thư mục:\n{e}")
-                return
-        self.download_btn.configure(state="disabled")
-        self.dl_progress.configure(mode="indeterminate")
-        self.dl_progress.start()
+                self._log(f"Khong the tao thu muc: {e}", "err"); return
+
+        dpg.configure_item("dl_btn", enabled=False)
+        dpg.set_value("dl_prog", 0.0)
         threading.Thread(target=self._worker, args=(targets, out), daemon=True).start()
 
     def _worker(self, targets, out):
         try:
             for kind, payload in targets:
                 if kind == "single":
-                    self._log(f"Đang tải: {payload}", "info")
+                    self._log(f"Dang tai: {payload}", "info")
                     fn = download_tiktok_video(payload, out)
-                    self._log(f"Hoàn thành: {fn}" if fn else f"Thất bại: {payload}",
+                    self._log(f"Hoan thanh: {fn}" if fn else f"That bai: {payload}",
                               "ok" if fn else "err")
                 elif kind == "profile":
                     url, max_v = payload
-                    self._log(f"Đang tải profile: {url}", "info")
+                    self._log(f"Dang tai profile: {url}", "info")
                     ok = download_from_profile(url, out, max_v)
-                    self._log("Tải profile hoàn thành." if ok else "Tải profile thất bại.",
+                    self._log("Tai profile hoan thanh." if ok else "Tai profile that bai.",
                               "ok" if ok else "err")
                 else:
                     for url in payload:
-                        self._log(f"Đang tải: {url}", "info")
+                        self._log(f"Dang tai: {url}", "info")
                         fn = download_tiktok_video(url, out)
-                        self._log(f"Hoàn thành: {fn}" if fn else f"Thất bại: {url}",
+                        self._log(f"Hoan thanh: {fn}" if fn else f"That bai: {url}",
                                   "ok" if fn else "err")
         except Exception as e:
-            self._log(f"Lỗi: {e}", "err")
+            self._log(f"Loi: {e}", "err")
         finally:
-            self.download_btn.configure(state="normal")
-            self.dl_progress.stop()
-            self.dl_progress.set(0)
+            try:
+                dpg.configure_item("dl_btn", enabled=True)
+                dpg.set_value("dl_prog", 0.0)
+            except Exception:
+                pass
 
     # ── Edit logic ─────────────────────────────────────────────────────────────
     def _apply_edit(self):
-        inp = self.edit_in.get().strip()
+        inp = dpg.get_value("edit_in").strip()
         if not inp or not os.path.isfile(inp):
-            messagebox.showwarning("Warning", "Vui lòng chọn file video hợp lệ.")
-            return
-        out = self.edit_out.get().strip() or None
-        tab = self.op_tabview.get()
-        self.edit_btn.configure(state="disabled")
-        self.edit_progress.configure(mode="indeterminate")
-        self.edit_progress.start()
-        threading.Thread(target=self._edit_worker, args=(tab, inp, out), daemon=True).start()
+            self._log("Vui long chon file video hop le.", "err"); return
+        out      = dpg.get_value("edit_out").strip() or None
+        tab_uuid = dpg.get_value("op_tabs")
+        tab      = dpg.get_item_label(tab_uuid) if dpg.does_item_exist(tab_uuid) else ""
 
-    def _edit_worker(self, tab, inp, out):
+        dpg.configure_item("edit_btn", enabled=False)
+        dpg.set_value("edit_prog", 0.0)
+        threading.Thread(target=self._edit_worker,
+                         args=(tab, inp, out), daemon=True).start()
+
+    def _edit_worker(self, tab: str, inp: str, out):
         try:
-            if tab == "📐 Resize":
-                w, h = int(self.res_w.get()), int(self.res_h.get())
-                self._log(f"📐 Resize {w}×{h}: {os.path.basename(inp)}", "info")
+            if "Resize" in tab:
+                w, h = int(dpg.get_value("res_w")), int(dpg.get_value("res_h"))
+                self._log(f"Resize {w}x{h}: {os.path.basename(inp)}", "info")
                 result = video_edit.resize_video(inp, w, h, out)
-            elif tab == "🎵 Audio":
-                if self.audio_mode.get() == "extract":
-                    fmt = self.audio_fmt.get()
-                    self._log(f"🎵 Extract audio ({fmt}): {os.path.basename(inp)}", "info")
+            elif "Audio" in tab:
+                mode = dpg.get_value("audio_mode")
+                if "Extract" in mode:
+                    fmt = dpg.get_value("audio_fmt")
+                    self._log(f"Extract audio ({fmt}): {os.path.basename(inp)}", "info")
                     result = video_edit.extract_audio(inp, fmt, out)
                 else:
-                    self._log(f"🔇 Remove audio: {os.path.basename(inp)}", "info")
+                    self._log(f"Remove audio: {os.path.basename(inp)}", "info")
                     result = video_edit.remove_audio(inp, out)
-            elif tab == "🔄 Convert":
-                fmt = self.conv_fmt.get()
-                self._log(f"🔄 Convert → {fmt}: {os.path.basename(inp)}", "info")
+            elif "Convert" in tab:
+                fmt = dpg.get_value("conv_fmt")
+                self._log(f"Convert -> {fmt}: {os.path.basename(inp)}", "info")
                 result = video_edit.convert_format(inp, fmt, out)
-            elif tab == "⚡ Speed":
-                try:
-                    speed = float(self.spd_value.get())
-                except ValueError:
-                    speed = 1.0
-                self._log(f"⚡ Speed {speed}×: {os.path.basename(inp)}", "info")
+            elif "Speed" in tab:
+                try:   speed = float(dpg.get_value("spd_val"))
+                except ValueError: speed = 1.0
+                self._log(f"Speed {speed}x: {os.path.basename(inp)}", "info")
                 result = video_edit.speed_video(inp, speed, out)
-            elif tab == "🔁 Rotate":
-                rotation = self.rot_choice.get()
-                self._log(f"🔁 Rotate ({rotation}): {os.path.basename(inp)}", "info")
-                result = video_edit.rotate_video(inp, rotation, out)
-            elif tab == "🎬 Merge":
-                paths = list(self.merge_list.get(0, tk.END))
+            elif "Rotate" in tab:
+                rot = dpg.get_value("rot_choice")
+                self._log(f"Rotate ({rot}): {os.path.basename(inp)}", "info")
+                result = video_edit.rotate_video(inp, rot, out)
+            elif "Merge" in tab:
+                paths = list(dpg.get_item_configuration("merge_list").get("items", []))
                 if not paths:
-                    self._log("Merge: chưa có file nào trong danh sách.", "err")
-                    return
-                self._log(f"🎬 Ghép {len(paths)} file...", "info")
+                    self._log("Merge: chua co file nao.", "err"); return
+                self._log(f"Ghep {len(paths)} file...", "info")
                 result = video_edit.merge_videos(paths, out)
             else:  # Logo
-                logo = self.logo_path.get().strip()
+                logo = dpg.get_value("logo_path").strip()
                 if not logo or not os.path.isfile(logo):
-                    self._log("Logo: chưa chọn file logo hợp lệ.", "err")
-                    return
-                pos = self.logo_pos.get()
-                cx  = self.logo_x.get().strip()  or "W-w-10"
-                cy  = self.logo_y.get().strip()  or "H-h-20"
+                    self._log("Logo: chua chon file logo hop le.", "err"); return
+                pos = dpg.get_value("logo_pos")
+                cx  = dpg.get_value("logo_x").strip()  or "W-w-10"
+                cy  = dpg.get_value("logo_y").strip()  or "H-h-20"
+                try:   scale = int(dpg.get_value("logo_scale"))
+                except ValueError: scale = 150
                 try:
-                    scale = int(self.logo_scale.get())
-                except ValueError:
-                    scale = 150
-                try:
-                    opacity = float(self.logo_opacity.get())
+                    opacity = float(dpg.get_value("logo_opacity"))
                     opacity = max(0.0, min(1.0, opacity))
-                except ValueError:
-                    opacity = 1.0
-                self._log(f"🖼 Logo ({pos}): {os.path.basename(inp)}", "info")
-                result = video_edit.add_logo(inp, logo, pos, cx, cy, scale, opacity, out)
-            self._log(f"Hoàn thành: {result}", "ok")
+                except ValueError: opacity = 1.0
+                self._log(f"Logo ({pos}): {os.path.basename(inp)}", "info")
+                result = video_edit.add_logo(inp, logo, pos, cx, cy,
+                                             scale, opacity, out)
+            self._log(f"Hoan thanh: {result}", "ok")
         except Exception as e:
-            self._log(f"Lỗi edit: {e}", "err")
+            self._log(f"Loi edit: {e}", "err")
         finally:
-            self.edit_btn.configure(state="normal")
-            self.edit_progress.stop()
-            self.edit_progress.set(0)
+            try:
+                dpg.configure_item("edit_btn", enabled=True)
+                dpg.set_value("edit_prog", 0.0)
+            except Exception:
+                pass
 
     # ── Batch logic ────────────────────────────────────────────────────────────
     def _apply_batch(self):
-        files = list(self.batch_list.get(0, tk.END))
+        files = list(dpg.get_item_configuration("batch_list").get("items", []))
         if not files:
-            messagebox.showwarning("Warning", "Chưa có file nào trong danh sách.")
-            return
-        op = self.batch_op.get()
-        out_dir = self.batch_out_dir.get().strip()
+            self._log("Chua co file nao trong danh sach.", "err"); return
+        op      = dpg.get_value("batch_op")
+        out_dir = dpg.get_value("batch_out").strip()
         if out_dir and not os.path.exists(out_dir):
             try:
                 os.makedirs(out_dir)
             except Exception as e:
-                messagebox.showerror("Error", f"Không thể tạo thư mục:\n{e}")
-                return
-        self.batch_btn.configure(state="disabled")
-        self.batch_progress.set(0)
-        self.batch_status_lbl.configure(text="")
-        threading.Thread(target=self._batch_worker, args=(files, op, out_dir), daemon=True).start()
+                self._log(f"Khong the tao thu muc: {e}", "err"); return
+        dpg.configure_item("batch_btn", enabled=False)
+        dpg.set_value("batch_prog", 0.0)
+        threading.Thread(target=self._batch_worker,
+                         args=(list(files), op, out_dir), daemon=True).start()
 
-    def _batch_worker(self, files, op, out_dir):
+    def _batch_worker(self, files: list, op: str, out_dir: str):
         ok_count = err_count = 0
         total = len(files)
         try:
             for i, inp in enumerate(files):
-                name = os.path.basename(inp)
-                base, orig_ext = os.path.splitext(name)
-                src_dir = os.path.dirname(inp)
+                name     = os.path.basename(inp)
+                base, ex = os.path.splitext(name)
+                src_dir  = os.path.dirname(inp)
 
-                def _out(suffix, ext=""):
-                    fname = f"{base}_{suffix}{ext or orig_ext}"
-                    return os.path.join(out_dir or src_dir, fname)
+                def _out(suffix: str, ext: str = "",
+                         _b=base, _e=ex, _s=src_dir) -> str:
+                    return os.path.join(out_dir or _s, f"{_b}_{suffix}{ext or _e}")
 
                 try:
                     self._log(f"[{i+1}/{total}] {op}: {name}", "info")
-                    if op == "📐 Resize":
-                        w, h = int(self.b_res_w.get()), int(self.b_res_h.get())
+                    if op == "Resize":
+                        w, h = (int(dpg.get_value("b_res_w")),
+                                int(dpg.get_value("b_res_h")))
                         result = video_edit.resize_video(inp, w, h, _out(f"{w}x{h}"))
-                    elif op == "🎵 Extract Audio":
-                        fmt = self.b_audio_fmt.get()
-                        result = video_edit.extract_audio(inp, fmt, _out("audio", f".{fmt}"))
-                    elif op == "🔇 Remove Audio":
+                    elif op == "Extract Audio":
+                        fmt    = dpg.get_value("b_audio_fmt")
+                        result = video_edit.extract_audio(
+                            inp, fmt, _out("audio", f".{fmt}"))
+                    elif op == "Remove Audio":
                         result = video_edit.remove_audio(inp, _out("noaudio"))
-                    elif op == "🔄 Convert":
-                        fmt = self.b_conv_fmt.get()
-                        result = video_edit.convert_format(inp, fmt, _out("converted", f".{fmt}"))
-                    elif op == "⚡ Speed":
-                        try:
-                            speed = float(self.b_speed.get())
-                        except ValueError:
-                            speed = 1.0
-                        result = video_edit.speed_video(inp, speed, _out(f"speed{speed}"))
-                    elif op == "🔁 Rotate":
-                        result = video_edit.rotate_video(inp, self.b_rotate.get(), _out("rotated"))
-                    elif op == "🖼 Logo":
-                        logo = self.b_logo_path.get().strip()
+                    elif op == "Convert":
+                        fmt    = dpg.get_value("b_conv_fmt")
+                        result = video_edit.convert_format(
+                            inp, fmt, _out("converted", f".{fmt}"))
+                    elif op == "Speed":
+                        try:   speed = float(dpg.get_value("b_speed"))
+                        except ValueError: speed = 1.0
+                        result = video_edit.speed_video(inp, speed,
+                                                         _out(f"speed{speed}"))
+                    elif op == "Rotate":
+                        result = video_edit.rotate_video(
+                            inp, dpg.get_value("b_rotate"), _out("rotated"))
+                    elif op == "Logo":
+                        logo = dpg.get_value("b_logo_path").strip()
                         if not logo or not os.path.isfile(logo):
-                            self._log(f"  ✗ Logo không hợp lệ, bỏ qua: {name}", "err")
-                            err_count += 1
-                            continue
-                        pos = self.b_logo_pos.get()
+                            self._log(f"  X Logo khong hop le: {name}", "err")
+                            err_count += 1; continue
+                        pos = dpg.get_value("b_logo_pos")
+                        try:   scale = int(dpg.get_value("b_logo_scale"))
+                        except ValueError: scale = 150
                         try:
-                            scale = int(self.b_logo_scale.get())
-                        except ValueError:
-                            scale = 150
-                        try:
-                            opacity = float(self.b_logo_opacity.get())
+                            opacity = float(dpg.get_value("b_logo_opacity"))
                             opacity = max(0.0, min(1.0, opacity))
-                        except ValueError:
-                            opacity = 1.0
-                        result = video_edit.add_logo(inp, logo, pos, "W-w-10", "H-h-20",
-                                                     scale, opacity, _out("logo"))
+                        except ValueError: opacity = 1.0
+                        result = video_edit.add_logo(
+                            inp, logo, pos, "W-w-10", "H-h-20",
+                            scale, opacity, _out("logo"))
                     else:
                         result = inp
-                    self._log(f"  ✓ → {os.path.basename(result)}", "ok")
+                    self._log(f"  OK -> {os.path.basename(result)}", "ok")
                     ok_count += 1
                 except Exception as e:
-                    self._log(f"  ✗ Lỗi: {e}", "err")
+                    self._log(f"  X Loi: {e}", "err")
                     err_count += 1
                 finally:
-                    self.batch_progress.set((i + 1) / total)
-                    self.batch_status_lbl.configure(
-                        text=f"{i+1}/{total}  —  ✓ {ok_count}   ✗ {err_count}")
+                    try:
+                        dpg.set_value("batch_prog", (i + 1) / total)
+                        dpg.set_value("batch_status",
+                                      f"{i+1}/{total}  —  OK {ok_count}"
+                                      f"   X {err_count}")
+                    except Exception:
+                        pass
         finally:
-            self.batch_btn.configure(state="normal")
-            tag = "ok" if err_count == 0 else "err"
-            self._log(f"Batch xong: {ok_count}/{total} thành công, {err_count} lỗi.", tag)
-            self.batch_status_lbl.configure(
-                text=f"Xong — ✓ {ok_count}   ✗ {err_count}   / {total} file")
+            try:
+                dpg.configure_item("batch_btn", enabled=True)
+                self._log(
+                    f"Batch xong: {ok_count}/{total} thanh cong,"
+                    f" {err_count} loi.",
+                    "ok" if err_count == 0 else "err")
+                dpg.set_value("batch_status",
+                              f"Xong — OK {ok_count}   X {err_count}"
+                              f"   / {total} file")
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    root = ctk.CTk()
-    app = App(root)
-    try:
-        root.state("zoomed")
-    except Exception:
-        try:
-            root.attributes("-zoomed", True)
-        except Exception:
-            pass
-    root.mainloop()
+    App().run()
