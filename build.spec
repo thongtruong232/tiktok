@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
 # Chỉ thêm ffmpeg.exe nếu file thực sự tồn tại
-_datas = []
+_datas = collect_data_files('customtkinter')
 if os.path.exists('ffmpeg.exe'):
     _datas.append(('ffmpeg.exe', '.'))
 
@@ -16,9 +16,10 @@ a = Analysis(
     datas=_datas,
     hiddenimports=[
         *collect_submodules('yt_dlp'),
-        *collect_submodules('moviepy'),
+        *collect_submodules('customtkinter'),
         'tiktok_download',
         'video_edit',
+        'PIL',
     ],
     hookspath=[],
     hooksconfig={},
