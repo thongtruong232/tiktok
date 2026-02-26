@@ -217,6 +217,13 @@ class App:
         outer_nb.add(edit_page, text='  ✂  Edit Video  ')
         self._build_edit_tab(edit_page)
 
+        # ─── Batch Edit page ──────────────────────────────────────────────
+        batch_page = ttk.Frame(outer_nb, padding=(0, 8, 0, 0))
+        batch_page.columnconfigure(0, weight=1)
+        batch_page.rowconfigure(0, weight=1)
+        outer_nb.add(batch_page, text='  📦  Batch Edit  ')
+        self._build_batch_tab(batch_page)
+
     # ── Edit Video tab ────────────────────────────────────────────────────────
     def _build_edit_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -743,6 +750,332 @@ class App:
                 self.edit_progress.stop()
             except Exception:
                 pass
+
+    # ── Batch Edit tab ────────────────────────────────────────────────────────
+    def _build_batch_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        # ── File list ────────────────────────────────────────────────────────
+        files_lf = ttk.LabelFrame(parent, text='Danh sách file input',
+                                  padding=(10, 8), style='Card.TLabelframe')
+        files_lf.grid(row=0, column=0, sticky='nsew', pady=(0, 8))
+        files_lf.columnconfigure(0, weight=1)
+        files_lf.rowconfigure(0, weight=1)
+
+        self.batch_list = tk.Listbox(
+            files_lf, selectmode='extended', height=7,
+            font=('Consolas', 9), relief='flat', bg=_CARD_BG,
+            highlightthickness=1, highlightbackground=_CARD_BORDER)
+        self.batch_list.grid(row=0, column=0, sticky='nsew')
+        sb = ttk.Scrollbar(files_lf, orient='vertical',
+                           command=self.batch_list.yview)
+        sb.grid(row=0, column=1, sticky='ns')
+        self.batch_list.configure(yscrollcommand=sb.set)
+
+        btn_bar = ttk.Frame(files_lf)
+        btn_bar.grid(row=1, column=0, sticky='w', pady=(6, 0))
+        ttk.Button(btn_bar, text='Add…',
+                   command=self._batch_add_files).pack(side='left')
+        ttk.Button(btn_bar, text='Remove',
+                   command=self._batch_remove_files).pack(side='left', padx=(6, 0))
+        ttk.Button(btn_bar, text='Clear',
+                   command=lambda: self.batch_list.delete(0, tk.END)).pack(side='left', padx=(6, 0))
+
+        # ── Output folder ────────────────────────────────────────────────────
+        out_lf = ttk.LabelFrame(
+            parent, text='Thư mục output  (để trống = cùng thư mục gốc)',
+            padding=(10, 8), style='Card.TLabelframe')
+        out_lf.grid(row=1, column=0, sticky='ew', pady=(0, 8))
+        out_lf.columnconfigure(0, weight=1)
+        self.batch_out_dir = ttk.Entry(out_lf)
+        self.batch_out_dir.grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        ttk.Button(out_lf, text='Browse…',
+                   command=self._batch_browse_out).grid(row=0, column=1)
+
+        # ── Operation ────────────────────────────────────────────────────────
+        op_lf = ttk.LabelFrame(parent, text='Thao tác áp dụng cho tất cả file',
+                               padding=(10, 8), style='Card.TLabelframe')
+        op_lf.grid(row=2, column=0, sticky='ew', pady=(0, 8))
+        op_lf.columnconfigure(1, weight=1)
+
+        ttk.Label(op_lf, text='Chọn thao tác:').grid(
+            row=0, column=0, sticky='w', pady=(0, 8))
+        _BATCH_OPS = ['📐 Resize', '🎵 Extract Audio', '🔇 Remove Audio',
+                      '🔄 Convert', '⚡ Speed', '🔁 Rotate', '🖼 Logo']
+        self.batch_op = ttk.Combobox(op_lf, state='readonly', width=22,
+                                     values=_BATCH_OPS)
+        self.batch_op.set('📐 Resize')
+        self.batch_op.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self.batch_op.bind('<<ComboboxSelected>>', self._on_batch_op_change)
+
+        settings_host = ttk.Frame(op_lf)
+        settings_host.grid(row=1, column=0, columnspan=2, sticky='ew')
+        settings_host.columnconfigure(0, weight=1)
+        self._batch_sf: dict[str, ttk.Frame] = {}
+
+        # -- Resize --
+        f = ttk.Frame(settings_host)
+        f.columnconfigure(1, weight=1)
+        ttk.Label(f, text='Preset').grid(row=0, column=0, sticky='w', pady=2)
+        self.b_res_preset = ttk.Combobox(f, state='readonly', width=22,
+                                         values=list(video_edit.PRESETS.keys()))
+        self.b_res_preset.set('720p  (1280×720)')
+        self.b_res_preset.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self.b_res_preset.bind('<<ComboboxSelected>>', self._on_b_preset_change)
+        ttk.Label(f, text='Width').grid(row=1, column=0, sticky='w', pady=2)
+        self.b_res_w = ttk.Entry(f, width=8)
+        self.b_res_w.insert(0, '1280')
+        self.b_res_w.grid(row=1, column=1, sticky='w', padx=(8, 0))
+        ttk.Label(f, text='Height').grid(row=2, column=0, sticky='w', pady=2)
+        self.b_res_h = ttk.Entry(f, width=8)
+        self.b_res_h.insert(0, '720')
+        self.b_res_h.grid(row=2, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['📐 Resize'] = f
+
+        # -- Extract Audio --
+        f2 = ttk.Frame(settings_host)
+        f2.columnconfigure(1, weight=1)
+        ttk.Label(f2, text='Định dạng output:').grid(row=0, column=0, sticky='w', pady=2)
+        self.b_audio_fmt = ttk.Combobox(f2, state='readonly', width=10,
+                                        values=['mp3', 'aac', 'wav', 'ogg', 'm4a'])
+        self.b_audio_fmt.set('mp3')
+        self.b_audio_fmt.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['🎵 Extract Audio'] = f2
+
+        # -- Remove Audio --
+        f3 = ttk.Frame(settings_host)
+        ttk.Label(f3, text='Xóa hoàn toàn âm thanh khỏi tất cả video đã chọn.',
+                  style='Hint.TLabel').pack(anchor='w', pady=4)
+        self._batch_sf['🔇 Remove Audio'] = f3
+
+        # -- Convert --
+        f4 = ttk.Frame(settings_host)
+        f4.columnconfigure(1, weight=1)
+        ttk.Label(f4, text='Định dạng output:').grid(row=0, column=0, sticky='w', pady=2)
+        self.b_conv_fmt = ttk.Combobox(f4, state='readonly', width=10,
+                                       values=video_edit.FORMATS)
+        self.b_conv_fmt.set('mp4')
+        self.b_conv_fmt.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['🔄 Convert'] = f4
+
+        # -- Speed --
+        f5 = ttk.Frame(settings_host)
+        f5.columnconfigure(1, weight=1)
+        ttk.Label(f5, text='Tốc độ (0.25 – 4.0):').grid(
+            row=0, column=0, sticky='w', pady=2)
+        self.b_speed = ttk.Spinbox(f5, from_=0.25, to=4.0,
+                                   increment=0.25, width=8, format='%.2f')
+        self.b_speed.set('2.00')
+        self.b_speed.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['⚡ Speed'] = f5
+
+        # -- Rotate --
+        f6 = ttk.Frame(settings_host)
+        f6.columnconfigure(1, weight=1)
+        ttk.Label(f6, text='Rotation / Flip:').grid(
+            row=0, column=0, sticky='w', pady=2)
+        self.b_rotate = ttk.Combobox(f6, state='readonly', width=28,
+                                     values=list(video_edit.ROTATIONS.keys()))
+        self.b_rotate.set(list(video_edit.ROTATIONS.keys())[0])
+        self.b_rotate.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['🔁 Rotate'] = f6
+
+        # -- Logo --
+        f7 = ttk.Frame(settings_host)
+        f7.columnconfigure(1, weight=1)
+        ttk.Label(f7, text='File logo:').grid(row=0, column=0, sticky='w', pady=2)
+        logo_row = ttk.Frame(f7)
+        logo_row.columnconfigure(0, weight=1)
+        logo_row.grid(row=0, column=1, sticky='ew', padx=(8, 0))
+        self.b_logo_path = ttk.Entry(logo_row)
+        self.b_logo_path.grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        ttk.Button(logo_row, text='Browse…',
+                   command=self._b_browse_logo).grid(row=0, column=1)
+        ttk.Label(f7, text='Vị trí:').grid(row=1, column=0, sticky='w', pady=2)
+        self.b_logo_pos = ttk.Combobox(f7, state='readonly', width=18,
+                                       values=list(video_edit.LOGO_POSITIONS.keys()))
+        self.b_logo_pos.set('Bottom-Right')
+        self.b_logo_pos.grid(row=1, column=1, sticky='w', padx=(8, 0))
+        ttk.Label(f7, text='Scale (px, 0=gốc):').grid(row=2, column=0, sticky='w', pady=2)
+        self.b_logo_scale = ttk.Spinbox(f7, from_=0, to=1920, increment=10, width=8)
+        self.b_logo_scale.set('150')
+        self.b_logo_scale.grid(row=2, column=1, sticky='w', padx=(8, 0))
+        ttk.Label(f7, text='Opacity (0.0–1.0):').grid(
+            row=3, column=0, sticky='w', pady=2)
+        self.b_logo_opacity = ttk.Spinbox(f7, from_=0.0, to=1.0,
+                                          increment=0.05, width=8, format='%.2f')
+        self.b_logo_opacity.set('1.00')
+        self.b_logo_opacity.grid(row=3, column=1, sticky='w', padx=(8, 0))
+        self._batch_sf['🖼 Logo'] = f7
+
+        # Show initial settings frame
+        self._show_batch_sf('📐 Resize')
+
+        # ── Apply button + progress + status ─────────────────────────────────
+        self.batch_btn = ttk.Button(parent, text='▶   Apply to All',
+                                    command=self._apply_batch,
+                                    style='Accent.TButton')
+        self.batch_btn.grid(row=3, column=0, sticky='ew', ipady=4, pady=(0, 0))
+        self.batch_progress = ttk.Progressbar(parent, mode='determinate')
+        self.batch_progress.grid(row=4, column=0, sticky='ew', pady=(8, 2))
+        self.batch_status_lbl = ttk.Label(parent, text='', style='Hint.TLabel')
+        self.batch_status_lbl.grid(row=5, column=0, sticky='w')
+
+    def _show_batch_sf(self, op: str) -> None:
+        for key, frame in self._batch_sf.items():
+            if key == op:
+                frame.grid(row=0, column=0, sticky='ew')
+            else:
+                frame.grid_remove()
+
+    def _on_batch_op_change(self, _event=None) -> None:
+        self._show_batch_sf(self.batch_op.get())
+
+    def _on_b_preset_change(self, _event=None) -> None:
+        key = self.b_res_preset.get()
+        w, h = video_edit.PRESETS.get(key, (None, None))
+        if w is not None:
+            self.b_res_w.delete(0, tk.END); self.b_res_w.insert(0, str(w))
+            self.b_res_h.delete(0, tk.END); self.b_res_h.insert(0, str(h))
+
+    def _batch_add_files(self) -> None:
+        files = filedialog.askopenfilenames(
+            title='Chọn file video',
+            filetypes=[('Video files', '*.mp4 *.mkv *.avi *.mov *.webm *.flv'),
+                       ('All files', '*.*')])
+        for f in files:
+            self.batch_list.insert(tk.END, f)
+
+    def _batch_remove_files(self) -> None:
+        for idx in reversed(self.batch_list.curselection()):
+            self.batch_list.delete(idx)
+
+    def _batch_browse_out(self) -> None:
+        folder = filedialog.askdirectory(title='Chọn thư mục output')
+        if folder:
+            self.batch_out_dir.delete(0, tk.END)
+            self.batch_out_dir.insert(0, folder)
+
+    def _b_browse_logo(self) -> None:
+        f = filedialog.askopenfilename(
+            title='Chọn file logo',
+            filetypes=[('Image files', '*.png *.jpg *.jpeg *.gif *.bmp *.webp'),
+                       ('All files', '*.*')])
+        if f:
+            self.b_logo_path.delete(0, tk.END)
+            self.b_logo_path.insert(0, f)
+
+    def _apply_batch(self) -> None:
+        files = list(self.batch_list.get(0, tk.END))
+        if not files:
+            messagebox.showwarning('Warning', 'Chưa có file nào trong danh sách.')
+            return
+        op = self.batch_op.get()
+        out_dir = self.batch_out_dir.get().strip()
+        if out_dir and not os.path.exists(out_dir):
+            try:
+                os.makedirs(out_dir)
+            except Exception as e:
+                messagebox.showerror('Error', f'Không thể tạo thư mục:\n{e}')
+                return
+        self.batch_btn.state(['disabled'])
+        self.batch_progress['value'] = 0
+        self.batch_progress['maximum'] = len(files)
+        self.batch_status_lbl.config(text='')
+        threading.Thread(target=self._batch_worker,
+                         args=(files, op, out_dir), daemon=True).start()
+
+    def _batch_worker(self, files: list, op: str, out_dir: str) -> None:
+        ok_count = err_count = 0
+        total = len(files)
+        try:
+            for i, inp in enumerate(files):
+                name = os.path.basename(inp)
+                base, orig_ext = os.path.splitext(name)
+                src_dir = os.path.dirname(inp)
+
+                def _out(suffix: str, ext: str = '') -> str:
+                    fname = f'{base}_{suffix}{ext or orig_ext}'
+                    return os.path.join(out_dir or src_dir, fname)
+
+                try:
+                    self._log(f'[{i+1}/{total}] {op}: {name}', 'info')
+
+                    if op == '📐 Resize':
+                        w = int(self.b_res_w.get())
+                        h = int(self.b_res_h.get())
+                        result = video_edit.resize_video(inp, w, h,
+                                                         _out(f'{w}x{h}'))
+
+                    elif op == '🎵 Extract Audio':
+                        fmt = self.b_audio_fmt.get()
+                        result = video_edit.extract_audio(inp, fmt,
+                                                          _out('audio', f'.{fmt}'))
+
+                    elif op == '🔇 Remove Audio':
+                        result = video_edit.remove_audio(inp, _out('noaudio'))
+
+                    elif op == '🔄 Convert':
+                        fmt = self.b_conv_fmt.get()
+                        result = video_edit.convert_format(inp, fmt,
+                                                           _out('converted', f'.{fmt}'))
+
+                    elif op == '⚡ Speed':
+                        try:
+                            speed = float(self.b_speed.get())
+                        except ValueError:
+                            speed = 1.0
+                        result = video_edit.speed_video(inp, speed,
+                                                        _out(f'speed{speed}'))
+
+                    elif op == '🔁 Rotate':
+                        rotation = self.b_rotate.get()
+                        result = video_edit.rotate_video(inp, rotation,
+                                                         _out('rotated'))
+
+                    elif op == '🖼 Logo':
+                        logo = self.b_logo_path.get().strip()
+                        if not logo or not os.path.isfile(logo):
+                            self._log(f'  ✗ Logo file không hợp lệ, bỏ qua: {name}', 'err')
+                            err_count += 1
+                            continue
+                        pos = self.b_logo_pos.get()
+                        try:
+                            scale = int(self.b_logo_scale.get())
+                        except ValueError:
+                            scale = 150
+                        try:
+                            opacity = float(self.b_logo_opacity.get())
+                            opacity = max(0.0, min(1.0, opacity))
+                        except ValueError:
+                            opacity = 1.0
+                        result = video_edit.add_logo(
+                            inp, logo, pos, 'W-w-10', 'H-h-20',
+                            scale, opacity, _out('logo'))
+                    else:
+                        result = inp
+
+                    self._log(f'  ✓ → {os.path.basename(result)}', 'ok')
+                    ok_count += 1
+
+                except Exception as e:
+                    self._log(f'  ✗ Lỗi: {e}', 'err')
+                    err_count += 1
+                finally:
+                    self.batch_progress['value'] = i + 1
+                    self.batch_status_lbl.config(
+                        text=f'{i+1}/{total}  —  ✓ {ok_count}   ✗ {err_count}')
+
+        finally:
+            try:
+                self.batch_btn.state(['!disabled'])
+            except Exception:
+                self.batch_btn.config(state='normal')
+            tag = 'ok' if err_count == 0 else 'err'
+            self._log(f'Batch hoàn thành: {ok_count}/{total} thành công, '
+                      f'{err_count} lỗi.', tag)
+            self.batch_status_lbl.config(
+                text=f'Xong — ✓ {ok_count}   ✗ {err_count}   / {total} file')
 
 
 if __name__ == '__main__':
