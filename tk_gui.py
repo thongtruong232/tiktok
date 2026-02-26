@@ -117,11 +117,8 @@ class App:
         sb.rowconfigure(10, weight=1)
 
     def _switch_page(self, page_id):
-        for pid, frame in self._pages.items():
-            if pid == page_id:
-                frame.grid()
-            else:
-                frame.grid_remove()
+        # tkraise() chỉ thay đổi Z-order, không trigger layout reflow → chuyển trang tức thì
+        self._pages[page_id].tkraise()
         for pid, btn in self._nav_btns.items():
             if pid == page_id:
                 btn.configure(fg_color=_NAV_ACTIVE, text_color=_FG)
