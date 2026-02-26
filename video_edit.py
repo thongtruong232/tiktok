@@ -1,19 +1,20 @@
-"""
-video_edit.py – Video editing helpers using ffmpeg-python.
-
-All functions accept an optional `output_path`.  If omitted, a sensible
-default name is derived from the input file.
-"""
-
 import os
-
+import subprocess
+import sys
 import ffmpeg
 
+
+def _run(stream) -> None:
+    """Run an ffmpeg stream graph, suppressing the console window on Windows."""
+    cmd = ffmpeg.compile(stream, overwrite_output=True)
+    kwargs: dict = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+    subprocess.run(cmd, check=True, **kwargs)
 
 # ── Internal helper ───────────────────────────────────────────────────────────
 
 def _derive(input_path: str, suffix: str, ext: str | None = None) -> str:
-    """Return <base>_<suffix>.<ext> next to the original file."""
     base, orig_ext = os.path.splitext(input_path)
     return f"{base}_{suffix}{ext if ext else orig_ext}"
 
@@ -32,15 +33,13 @@ PRESETS = {
 
 def resize_video(input_path: str, width: int, height: int,
                  output_path: str | None = None) -> str:
-    """Resize to *width*×*height*. Use -1 for either dimension to keep aspect."""
     output_path = output_path or _derive(input_path, f'{width}x{height}')
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .filter('scale', width, height)
         .output(output_path)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
@@ -49,29 +48,25 @@ def resize_video(input_path: str, width: int, height: int,
 
 def extract_audio(input_path: str, output_format: str = 'mp3',
                   output_path: str | None = None) -> str:
-    """Extract the audio stream to a standalone audio file."""
     if not output_path:
         base = os.path.splitext(input_path)[0]
         output_path = f'{base}_audio.{output_format}'
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .output(output_path, vn=None)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
 
 def remove_audio(input_path: str, output_path: str | None = None) -> str:
-    """Strip the audio track from a video (video-copy, no re-encode)."""
     output_path = output_path or _derive(input_path, 'noaudio')
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .output(output_path, an=None, vcodec='copy')
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
@@ -83,16 +78,15 @@ FORMATS = ['mp4', 'mkv', 'avi', 'mov', 'webm', 'gif']
 
 def convert_format(input_path: str, output_format: str,
                    output_path: str | None = None) -> str:
-    """Re-mux / transcode to the given container format."""
+
     if not output_path:
         base = os.path.splitext(input_path)[0]
         output_path = f'{base}_converted.{output_format}'
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .output(output_path)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
@@ -101,11 +95,7 @@ def convert_format(input_path: str, output_format: str,
 
 def speed_video(input_path: str, speed: float,
                output_path: str | None = None) -> str:
-    """
-    Change playback speed.
-    speed > 1  → faster (e.g. 2.0 = 2×).  speed < 1 → slower (e.g. 0.5 = ½×).
-    Audio tempo is adjusted to match; supports 0.25×–4.0× range.
-    """
+
     output_path = output_path or _derive(input_path, f'speed{speed}')
     pts = 1.0 / speed          # PTS factor (inverse of speed)
     # atempo filter only accepts 0.5–2.0 per node; chain nodes if needed
@@ -120,14 +110,13 @@ def speed_video(input_path: str, speed: float,
     atempo_chain.append(f'atempo={tempo:.4f}')
     audio_filter = ','.join(atempo_chain)
 
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .output(output_path,
                 vf=f'setpts={pts:.4f}*PTS',
                 af=audio_filter)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
@@ -148,12 +137,11 @@ def rotate_video(input_path: str, rotation: str,
     """Apply a rotation/flip using FFmpeg vf filters."""
     output_path = output_path or _derive(input_path, 'rotated')
     vf = ROTATIONS.get(rotation, 'transpose=1')
-    (
+    _run(
         ffmpeg
         .input(input_path)
         .output(output_path, vf=vf)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path
 
@@ -178,12 +166,11 @@ def merge_videos(input_paths: list[str],
         with open(list_file, 'w', encoding='utf-8') as fh:
             for p in input_paths:
                 fh.write(f"file '{p}'\n")
-        (
+        _run(
             ffmpeg
             .input(list_file, format='concat', safe=0)
             .output(output_path, c='copy')
             .overwrite_output()
-            .run(quiet=True)
         )
     finally:
         if os.path.exists(list_file):
@@ -210,17 +197,7 @@ def add_logo(input_path: str, logo_path: str,
              scale: int = 150,
              opacity: float = 1.0,
              output_path: str | None = None) -> str:
-    """
-    Overlay a logo/image onto a video.
 
-    Args:
-        input_path : source video
-        logo_path  : image file (PNG recommended for transparency)
-        position   : one of LOGO_POSITIONS keys, or 'Custom'
-        custom_x/y : FFmpeg overlay x/y expressions (used when position=='Custom')
-        scale      : logo width in pixels; 0 = keep original size
-        opacity    : 0.0 (transparent) – 1.0 (opaque)
-    """
     output_path = output_path or _derive(input_path, 'logo')
 
     px, py = LOGO_POSITIONS.get(position, (None, None))
@@ -228,7 +205,7 @@ def add_logo(input_path: str, logo_path: str,
         px, py = custom_x, custom_y
 
     # Build two separate inputs
-    video  = ffmpeg.input(input_path)
+    src    = ffmpeg.input(input_path)
     logo   = ffmpeg.input(logo_path)
 
     # Preprocess logo: scale → format rgba → opacity
@@ -238,13 +215,13 @@ def add_logo(input_path: str, logo_path: str,
     if opacity < 1.0:
         logo = logo.filter('colorchannelmixer', aa=f'{opacity:.3f}')
 
-    # Overlay logo onto video
-    out_stream = ffmpeg.overlay(video, logo, x=px, y=py)
+    # Overlay logo onto video stream only
+    video_out = ffmpeg.overlay(src.video, logo, x=px, y=py)
 
-    (
+    # Re-attach the original audio stream to preserve it
+    _run(
         ffmpeg
-        .output(out_stream, output_path)
+        .output(video_out, src.audio, output_path)
         .overwrite_output()
-        .run(quiet=True)
     )
     return output_path

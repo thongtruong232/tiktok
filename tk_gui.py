@@ -748,4 +748,12 @@ class App:
 if __name__ == '__main__':
     root = tk.Tk()
     app = App(root)
+    # Start maximized (full-window) where supported. Falls back safely.
+    try:
+        root.state('zoomed')
+    except Exception:
+        try:
+            root.attributes('-zoomed', True)
+        except Exception:
+            pass
     root.mainloop()
