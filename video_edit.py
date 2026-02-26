@@ -189,3 +189,62 @@ def merge_videos(input_paths: list[str],
         if os.path.exists(list_file):
             os.remove(list_file)
     return output_path
+
+
+# ── 9. Logo / Image overlay ───────────────────────────────────────────────────
+
+LOGO_POSITIONS = {
+    'Top-Left':     ('10',        '10'),
+    'Top-Right':    ('W-w-10',    '10'),
+    'Bottom-Left':  ('10',        'H-h-20'),
+    'Bottom-Right': ('W-w-10',    'H-h-20'),
+    'Center':       ('(W-w)/2',   '(H-h)/2'),
+    'Custom':       (None,        None),
+}
+
+
+def add_logo(input_path: str, logo_path: str,
+             position: str = 'Bottom-Right',
+             custom_x: str = 'W-w-10',
+             custom_y: str = 'H-h-20',
+             scale: int = 150,
+             opacity: float = 1.0,
+             output_path: str | None = None) -> str:
+    """
+    Overlay a logo/image onto a video.
+
+    Args:
+        input_path : source video
+        logo_path  : image file (PNG recommended for transparency)
+        position   : one of LOGO_POSITIONS keys, or 'Custom'
+        custom_x/y : FFmpeg overlay x/y expressions (used when position=='Custom')
+        scale      : logo width in pixels; 0 = keep original size
+        opacity    : 0.0 (transparent) – 1.0 (opaque)
+    """
+    output_path = output_path or _derive(input_path, 'logo')
+
+    px, py = LOGO_POSITIONS.get(position, (None, None))
+    if px is None:          # Custom
+        px, py = custom_x, custom_y
+
+    # Build two separate inputs
+    video  = ffmpeg.input(input_path)
+    logo   = ffmpeg.input(logo_path)
+
+    # Preprocess logo: scale → format rgba → opacity
+    if scale > 0:
+        logo = logo.filter('scale', scale, -1)
+    logo = logo.filter('format', 'rgba')
+    if opacity < 1.0:
+        logo = logo.filter('colorchannelmixer', aa=f'{opacity:.3f}')
+
+    # Overlay logo onto video
+    out_stream = ffmpeg.overlay(video, logo, x=px, y=py)
+
+    (
+        ffmpeg
+        .output(out_stream, output_path)
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    return output_path

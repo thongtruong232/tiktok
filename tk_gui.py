@@ -241,6 +241,7 @@ class App:
         self._build_speed_tab(op_nb)
         self._build_rotate_tab(op_nb)
         self._build_merge_tab(op_nb)
+        self._build_logo_tab(op_nb)
 
         # Output file
         out_lf = ttk.LabelFrame(parent, text='Output File  (để trống = tự động)',
@@ -350,6 +351,81 @@ class App:
             self.merge_list.delete(idx)
             self.merge_list.insert(neighbour, val)
             self.merge_list.selection_set(neighbour)
+
+    def _build_logo_tab(self, nb: ttk.Notebook) -> None:
+        f = ttk.Frame(nb, padding=12)
+        nb.add(f, text='  🖼 Logo  ')
+        f.columnconfigure(1, weight=1)
+
+        # Logo file
+        ttk.Label(f, text='File logo (PNG/JPG):',
+                  font=('Segoe UI', 9, 'bold')).grid(
+            row=0, column=0, sticky='w', pady=(0, 4))
+        logo_row = ttk.Frame(f)
+        logo_row.grid(row=1, column=0, columnspan=2, sticky='ew')
+        logo_row.columnconfigure(0, weight=1)
+        self.logo_path = ttk.Entry(logo_row)
+        self.logo_path.grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        ttk.Button(logo_row, text='Browse…',
+                   command=self._browse_logo).grid(row=0, column=1)
+
+        # Position
+        ttk.Label(f, text='Vị trí:').grid(row=2, column=0, sticky='w', pady=(10, 4))
+        self.logo_pos = ttk.Combobox(f, state='readonly', width=18,
+                                     values=list(video_edit.LOGO_POSITIONS.keys()))
+        self.logo_pos.set('Bottom-Right')
+        self.logo_pos.grid(row=2, column=1, sticky='w', padx=(8, 0))
+        self.logo_pos.bind('<<ComboboxSelected>>', self._on_logo_pos_change)
+
+        # Custom x/y (hidden by default)
+        self._logo_custom_frame = ttk.Frame(f)
+        self._logo_custom_frame.grid(row=3, column=0, columnspan=2, sticky='ew')
+        ttk.Label(self._logo_custom_frame, text='X expr:').grid(
+            row=0, column=0, sticky='w', pady=2)
+        self.logo_x = ttk.Entry(self._logo_custom_frame, width=14)
+        self.logo_x.insert(0, 'W-w-10')
+        self.logo_x.grid(row=0, column=1, sticky='w', padx=(6, 20))
+        ttk.Label(self._logo_custom_frame, text='Y expr:').grid(
+            row=0, column=2, sticky='w', pady=2)
+        self.logo_y = ttk.Entry(self._logo_custom_frame, width=14)
+        self.logo_y.insert(0, 'H-h-20')
+        self.logo_y.grid(row=0, column=3, sticky='w', padx=(6, 0))
+        self._logo_custom_frame.grid_remove()   # hide initially
+
+        # Scale
+        ttk.Label(f, text='Scale (px rộng, 0=gốc):').grid(
+            row=4, column=0, sticky='w', pady=(10, 4))
+        self.logo_scale = ttk.Spinbox(f, from_=0, to=1920, increment=10, width=8)
+        self.logo_scale.set('150')
+        self.logo_scale.grid(row=4, column=1, sticky='w', padx=(8, 0))
+
+        # Opacity
+        ttk.Label(f, text='Opacity (0.0 – 1.0):').grid(
+            row=5, column=0, sticky='w', pady=(6, 4))
+        self.logo_opacity = ttk.Spinbox(f, from_=0.0, to=1.0, increment=0.05,
+                                        width=8, format='%.2f')
+        self.logo_opacity.set('1.00')
+        self.logo_opacity.grid(row=5, column=1, sticky='w', padx=(8, 0))
+
+        ttk.Label(f,
+                  text='Dùng PNG có nền trong suốt để logo đẹp nhất.',
+                  style='Hint.TLabel').grid(
+            row=6, column=0, columnspan=2, sticky='w', pady=(10, 0))
+
+    def _browse_logo(self) -> None:
+        f = filedialog.askopenfilename(
+            title='Chọn file logo',
+            filetypes=[('Image files', '*.png *.jpg *.jpeg *.gif *.bmp *.webp'),
+                       ('All files', '*.*')])
+        if f:
+            self.logo_path.delete(0, tk.END)
+            self.logo_path.insert(0, f)
+
+    def _on_logo_pos_change(self, _event=None) -> None:
+        if self.logo_pos.get() == 'Custom':
+            self._logo_custom_frame.grid()
+        else:
+            self._logo_custom_frame.grid_remove()
 
     def _build_resize_tab(self, nb: ttk.Notebook) -> None:
         f = ttk.Frame(nb, padding=12)
@@ -625,13 +701,35 @@ class App:
                 result = video_edit.rotate_video(inp, rotation, out)
                 self._log(f'Hoàn thành: {result}', 'ok')
 
-            else:                  # Merge
+            elif op_idx == 5:       # Merge
                 paths = list(self.merge_list.get(0, tk.END))
                 if not paths:
                     self._log('Merge: chưa có file nào trong danh sách.', 'err')
                     return
                 self._log(f'🎬 Đang ghép {len(paths)} file...', 'info')
                 result = video_edit.merge_videos(paths, out)
+                self._log(f'Hoàn thành: {result}', 'ok')
+
+            else:                   # Logo
+                logo = self.logo_path.get().strip()
+                if not logo or not os.path.isfile(logo):
+                    self._log('Logo: chưa chọn file logo hợp lệ.', 'err')
+                    return
+                pos  = self.logo_pos.get()
+                cx   = self.logo_x.get().strip()   or 'W-w-10'
+                cy   = self.logo_y.get().strip()   or 'H-h-20'
+                try:
+                    scale = int(self.logo_scale.get())
+                except ValueError:
+                    scale = 150
+                try:
+                    opacity = float(self.logo_opacity.get())
+                    opacity = max(0.0, min(1.0, opacity))
+                except ValueError:
+                    opacity = 1.0
+                self._log(f'🖼 Đang thêm logo ({pos}): {os.path.basename(inp)}', 'info')
+                result = video_edit.add_logo(inp, logo, pos, cx, cy,
+                                             scale, opacity, out)
                 self._log(f'Hoàn thành: {result}', 'ok')
 
         except Exception as e:
