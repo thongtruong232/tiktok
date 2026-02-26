@@ -1,4 +1,5 @@
 import os
+import json
 import queue
 import threading
 import tkinter as _tk               # used ONLY for file dialogs
@@ -61,13 +62,62 @@ class App:
         self._batch_items: list[str]        = []          # batch listbox items
 
     # ─────────────────────────────────────────────────────────────────────────
+    def _load_window_config(self):
+        """Load saved window dimensions from config file."""
+        config_file = os.path.join(os.path.dirname(__file__), "window_config.json")
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+        return None
+
+    def _save_window_config(self):
+        """Save current window dimensions to config file."""
+        try:
+            vw = dpg.get_viewport_width()
+            vh = dpg.get_viewport_height()
+            config = {"width": vw, "height": vh}
+            config_file = os.path.join(os.path.dirname(__file__), "window_config.json")
+            with open(config_file, 'w') as f:
+                json.dump(config, f)
+        except Exception:
+            pass  # Silent fail on save error
+
     def run(self):
         dpg.create_context()
         self._setup_fonts()
         self._setup_themes()
         self._load_logo_texture()
+        
+        # Load saved window config, or use primary monitor fullscreen
+        win_config = self._load_window_config()
+        if win_config and "width" in win_config and "height" in win_config:
+            screen_w = win_config["width"]
+            screen_h = win_config["height"]
+        else:
+            # Default to primary monitor fullscreen
+            try:
+                from screeninfo import get_monitors
+                monitors = get_monitors()
+                primary = monitors[0]  # Primary / main monitor
+                screen_w = primary.width
+                screen_h = primary.height
+            except (ImportError, IndexError):
+                # Fallback to Tkinter if screeninfo not available
+                import tkinter as _tk_screen
+                _screen = _tk_screen.Tk()
+                _screen.withdraw()
+                screen_w = _screen.winfo_screenwidth()
+                screen_h = _screen.winfo_screenheight()
+                # If multi-monitor detected (width >> 2560), use only half
+                if screen_w > 2560:
+                    screen_w = screen_w // 2
+                _screen.destroy()
+        
         dpg.create_viewport(title="TikTok Downloader",
-                            width=1280, height=760,
+                            width=screen_w, height=screen_h,
                             min_width=980, min_height=580)
         dpg.setup_dearpygui()
         self._build_ui()
@@ -258,17 +308,17 @@ class App:
             # ── Logo area ────────────────────────────────────────────────────
             dpg.add_spacer(height=18)
             if self._logo_texture:
-                # Use image button if logo loaded successfully
+                # Use image button if logo loaded successfully (left-aligned)
                 logo = dpg.add_image_button(
-                    "logo_texture", width=50, height=50,
+                    "logo_texture", width=60, height=60,
                     enabled=False,
-                    indent=(_SIDEBAR_W - 50) // 2)
+                    indent=8)
                 dpg.bind_item_theme(logo, "th_logo")
             else:
-                # Fallback to text button if logo fails to load
-                logo = dpg.add_button(label="D", width=50, height=50,
+                # Fallback to text button if logo fails to load (left-aligned)
+                logo = dpg.add_button(label="D", width=80, height=80,
                                       enabled=False,
-                                      indent=(_SIDEBAR_W - 50) // 2)
+                                      indent=8)
                 dpg.bind_item_theme(logo, "th_logo")
                 if dpg.does_item_exist("f_title"):
                     dpg.bind_item_font(logo, "f_title")
@@ -399,7 +449,7 @@ class App:
                     dpg.add_spacer(height=6)
                     with dpg.group(horizontal=True):
                         dpg.add_input_text(tag="dl_out", default_value="downloads",
-                                           width=-186)
+                                           width=-230)
                         dpg.add_button(label="Duyệt...", width=84,
                                        callback=lambda: self._browse_dir("dl_out"))
                         dpg.add_spacer(width=4)
@@ -677,21 +727,24 @@ class App:
                 dpg.add_spacer(height=10)
 
                 # File list
-                with dpg.child_window(height=200, border=True, indent=16):
-                    dpg.add_text("DANH SÁCH FILE ĐẦU VÀO", color=_CF2, indent=16)
-                    dpg.add_spacer(height=6)
-                    dpg.add_listbox(tag="batch_list", items=[], width=-8,
-                                    num_items=5)
-                    dpg.add_spacer(height=6)
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="Thêm...", width=84,
-                                       callback=self._batch_add_files)
-                        dpg.add_spacer(width=4)
-                        dpg.add_button(label="Xóa", width=84,
-                                       callback=self._batch_remove_file)
-                        dpg.add_spacer(width=4)
-                        dpg.add_button(label="Xóa hết", width=84,
-                                       callback=self._batch_clear)
+                dpg.add_text("DANH SÁCH FILE ĐẦU VÀO", color=_CF2, indent=16)
+                dpg.add_spacer(height=6)
+                dpg.add_input_text(tag="batch_list_display", multiline=True,
+                                   width=-16, height=120, readonly=True,
+                                   indent=16, hint="Chưa có file nào")
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True, indent=16):
+                    dpg.add_button(label="Thêm...", width=84,
+                                   callback=self._batch_add_files)
+                    dpg.add_spacer(width=4)
+                    dpg.add_combo(tag="batch_file_select", items=[], width=180,
+                                  default_value="")
+                    dpg.add_spacer(width=4)
+                    dpg.add_button(label="Xóa", width=60,
+                                   callback=self._batch_remove_file)
+                    dpg.add_spacer(width=4)
+                    dpg.add_button(label="Xóa hết", width=84,
+                                   callback=self._batch_clear)
 
                 dpg.add_spacer(height=10)
 
@@ -837,7 +890,7 @@ class App:
             dpg.add_separator()
             dpg.add_spacer(height=6)
             with dpg.child_window(tag="log_content", width=_LOG_W - 16,
-                                  height=h - 94, border=False, indent=8):
+                                  height=h - 60, border=False, indent=8):
                 dpg.bind_item_theme("log_content", "th_log")
             dpg.add_spacer(height=6)
             with dpg.group(horizontal=True, indent=8):
@@ -880,8 +933,7 @@ class App:
                             for f in new_files:
                                 if f not in self._batch_items:
                                     self._batch_items.append(f)
-                            dpg.configure_item("batch_list",
-                                               items=list(self._batch_items))
+                            self._refresh_batch_list_display()
                         else:
                             # generic listbox fallback
                             dpg.configure_item(target, items=new_files)
@@ -934,7 +986,7 @@ class App:
         dpg.set_item_height("content_host", vh)
         dpg.set_item_height("log_panel",    vh)
         dpg.set_item_width("log_content",   _LOG_W - 16)
-        dpg.set_item_height("log_content",  vh - 94)
+        dpg.set_item_height("log_content",  vh - 60)
 
         for pg in ["pg_dl", "pg_edit", "pg_batch"]:
             dpg.set_item_width(pg, cw)
@@ -942,6 +994,9 @@ class App:
         for sc in ["dl_scroll", "edit_scroll", "batch_scroll"]:
             dpg.set_item_width(sc, cw)
             dpg.set_item_height(sc, vh - _HDR_H)
+        
+        # Save window dimensions for next session
+        self._save_window_config()
 
     # ── File dialog helpers ────────────────────────────────────────────────────
     # ── File dialog helpers (run dialogs in worker threads and post results back)
@@ -1084,6 +1139,17 @@ class App:
             dpg.set_value("merge_list", self._merge_items[nb])
 
     # ── Batch list helpers ─────────────────────────────────────────────────────
+    def _refresh_batch_list_display(self):
+        """Update batch_list_display text and batch_file_select combo."""
+        text = "\n".join(self._batch_items) if self._batch_items else ""
+        try:
+            dpg.set_value("batch_list_display", text)
+            dpg.configure_item("batch_file_select",
+                               items=list(self._batch_items),
+                               default_value=self._batch_items[0] if self._batch_items else "")
+        except Exception:
+            pass
+
     def _batch_add_files(self):
         self._start_dialog_thread(
             'open_multi', '__batch__',
@@ -1091,14 +1157,14 @@ class App:
              ("All files",   "*.*")])
 
     def _batch_remove_file(self):
-        selected = dpg.get_value("batch_list")
+        selected = dpg.get_value("batch_file_select")
         if selected in self._batch_items:
             self._batch_items.remove(selected)
-            dpg.configure_item("batch_list", items=list(self._batch_items))
+            self._refresh_batch_list_display()
 
     def _batch_clear(self):
         self._batch_items.clear()
-        dpg.configure_item("batch_list", items=[])
+        self._refresh_batch_list_display()
 
     # ── Download logic ─────────────────────────────────────────────────────────
     def start_download(self):
