@@ -412,8 +412,8 @@ class App:
                         t = dpg.add_text("Chọn loại link để tải video", indent=20)
                         if dpg.does_item_exist("f_bold"):
                             dpg.bind_item_font(t, "f_bold")
-                        dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
-                                     color=_CF2, indent=20)
+                        # dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
+                        #              color=_CF2, indent=20)
                         dpg.add_spacer(height=10)
 
                         dpg.add_radio_button(
@@ -463,8 +463,8 @@ class App:
                         t = dpg.add_text("Tải video từ YouTube", indent=20)
                         if dpg.does_item_exist("f_bold"):
                             dpg.bind_item_font(t, "f_bold")
-                        dpg.add_text("Hỗ trợ:  Video đơn  |  Playlist  |  Nhiều URLs",
-                                     color=_CF2, indent=20)
+                        # dpg.add_text("Hỗ trợ:  Video đơn  |  Playlist  |  Nhiều URLs",
+                        #              color=_CF2, indent=20)
                         dpg.add_spacer(height=10)
 
                         dpg.add_radio_button(
