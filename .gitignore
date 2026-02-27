@@ -1,0 +1,9 @@
+downloads/
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+dist/
+build/
+cookies.txt
+window_config.json

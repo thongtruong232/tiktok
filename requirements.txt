@@ -1,0 +1,6 @@
+yt-dlp
+ffmpeg-python
+dearpygui
+Pillow
+numpy
+screeninfo
