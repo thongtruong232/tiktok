@@ -1920,7 +1920,7 @@ class App:
                 elif kind == "tt_profile":
                     url, max_v = payload
                     self._log(f"[TikTok] Đang tải profile: {url}", "info")
-                    ok = download_from_profile(url, out, max_v, _prog_hook)
+                    ok = download_from_profile(url, out, max_v, _prog_hook, self._log)
                     self._log(
                         "Tải profile hoàn thành." if ok else "Tải profile thất bại.",
                         "ok" if ok else "err")

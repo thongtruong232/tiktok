@@ -4,3 +4,4 @@ dearpygui
 Pillow
 numpy
 screeninfo
+requests
