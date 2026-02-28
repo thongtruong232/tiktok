@@ -56,22 +56,78 @@ _COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies
 
 # Cache cookie option so browser DB is probed only once per session
 _cached_cookies: dict | None = None
+_cached_cookies_mtime: float = 0.0   # track file changes to invalidate cache
+
+
+def _cookie_status_text() -> str:
+    """Return human-readable cookie usage status."""
+    opt = _cookies_opt()
+    if "cookiefile" in opt:
+        return "cookies.txt"
+    if "cookiesfrombrowser" in opt:
+        browser = opt["cookiesfrombrowser"][0] if opt["cookiesfrombrowser"] else "browser"
+        return f"browser:{browser}"
+    return "không sử dụng"
+
+
+def get_youtube_runtime_context(quality: str = "best", use_cookies: bool = False) -> dict:
+    """Return current runtime context used for YouTube downloads."""
+    if use_cookies:
+        cookie_status = _cookie_status_text()
+        cookies_opt = _cookies_opt()
+    else:
+        cookie_status = "tắt"
+        cookies_opt = {}
+    return {
+        "quality": quality,
+        "cookies": cookie_status,
+        "using_cookies": bool(cookies_opt),
+        "using_aria2c": _has_aria2c(),
+        "concurrent_fragments": 8,
+    }
+
+
+def _validate_cookies_file(path: str) -> bool:
+    """Check if a cookies.txt file is valid Netscape format with content."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return False
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Valid Netscape cookie line has >=7 tab-separated fields
+                if len(line.split("\t")) >= 7:
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _cookies_opt() -> dict:
     """Return the best available cookies option.
 
     Priority:
-      1. cookies.txt in the project folder (Netscape format, exported manually
-         via browser extension such as 'Get cookies.txt LOCALLY')
+      1. cookies.txt in the project folder (valid Netscape format)
       2. Try live browser cookie extraction (only works when browser is closed)
-      3. No cookies — web_creator client works for most public videos
+      3. No cookies  — yt-dlp default extraction still works for public videos
     """
-    global _cached_cookies
+    global _cached_cookies, _cached_cookies_mtime
+
+    # Invalidate cache if cookies.txt was modified/created/removed
+    try:
+        current_mtime = os.path.getmtime(_COOKIE_FILE) if os.path.exists(_COOKIE_FILE) else 0.0
+    except OSError:
+        current_mtime = 0.0
+    if current_mtime != _cached_cookies_mtime:
+        _cached_cookies = None
+        _cached_cookies_mtime = current_mtime
+
     if _cached_cookies is not None:
         return _cached_cookies
 
-    if os.path.exists(_COOKIE_FILE) and os.path.getsize(_COOKIE_FILE) > 0:
+    if _validate_cookies_file(_COOKIE_FILE):
         _cached_cookies = {"cookiefile": _COOKIE_FILE}
         return _cached_cookies
 
@@ -115,6 +171,7 @@ def _build_ydl_opts(
     out_dir: str,
     quality: str = "best",
     progress_hook: Callable | None = None,
+    use_cookies: bool = False,
 ) -> dict:
     """Construct yt-dlp options dict optimized for maximum quality & speed."""
     fmt = _QUALITY_FORMATS.get(quality, _QUALITY_FORMATS["best"])
@@ -158,13 +215,6 @@ def _build_ydl_opts(
             "asr",
             "size",
         ],
-
-        # ── Player clients (no PO Token / JS runtime required) ────────────
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web_creator", "ios", "android"],
-            }
-        },
     }
 
     # Remove keys with None values
@@ -190,8 +240,14 @@ def _build_ydl_opts(
             ]
         }
 
-    # ── Inject cookies if available ───────────────────────────────────────────
-    opts.update(_cookies_opt())
+    # ── Inject cookies only when explicitly enabled ─────────────────────────
+    # NOTE: cookies trigger a JS-based signature path in yt-dlp that requires
+    #       deno runtime.  Without deno, only thumbnails are returned.
+    #       Default extraction (no cookies) returns full DASH formats (up to 4K)
+    #       for all public videos without any JS runtime.
+    if use_cookies:
+        cookie_opts = _cookies_opt()
+        opts.update(cookie_opts)
 
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
@@ -206,6 +262,8 @@ def download_youtube_video(
     out_dir: str,
     quality: str = "best",
     progress_hook: Callable | None = None,
+    log_fn: Callable | None = None,
+    use_cookies: bool = False,
 ) -> str | None:
     """Download a single YouTube video.
 
@@ -214,11 +272,21 @@ def download_youtube_video(
         out_dir:       Output directory.
         quality:       One of QUALITY_OPTIONS (default "best").
         progress_hook: Optional yt-dlp progress callback.
+        use_cookies:   Whether to inject cookies.txt (default False).
 
     Returns: output filepath on success, None on failure.
     """
     os.makedirs(out_dir, exist_ok=True)
-    opts = _build_ydl_opts(out_dir, quality, progress_hook)
+    if log_fn:
+        ctx = get_youtube_runtime_context(quality, use_cookies)
+        log_fn(
+            "[YouTube] cấu hình tải: "
+            f"quality={ctx['quality']} | cookies={ctx['cookies']} | "
+            f"aria2c={'bật' if ctx['using_aria2c'] else 'tắt'} | "
+            f"N={ctx['concurrent_fragments']}",
+            "info",
+        )
+    opts = _build_ydl_opts(out_dir, quality, progress_hook, use_cookies)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -236,13 +304,23 @@ def download_youtube_playlist(
     max_videos: int | None = None,
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
+    use_cookies: bool = False,
 ) -> tuple[int, int]:
     """Download all (or up to max_videos) videos from a playlist.
 
     Returns: (success_count, total_count)
     """
     os.makedirs(out_dir, exist_ok=True)
-    opts = _build_ydl_opts(out_dir, quality, progress_hook)
+    if log_fn:
+        ctx = get_youtube_runtime_context(quality, use_cookies)
+        log_fn(
+            "[YouTube] cấu hình playlist: "
+            f"quality={ctx['quality']} | cookies={ctx['cookies']} | "
+            f"aria2c={'bật' if ctx['using_aria2c'] else 'tắt'} | "
+            f"N={ctx['concurrent_fragments']}",
+            "info",
+        )
+    opts = _build_ydl_opts(out_dir, quality, progress_hook, use_cookies)
     if max_videos:
         opts["playlistend"] = max_videos
 
@@ -281,6 +359,7 @@ def download_youtube_multi(
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
     max_workers: int = MAX_CONCURRENT_DOWNLOADS,
+    use_cookies: bool = False,
 ) -> tuple[int, int]:
     """Download multiple individual YouTube URLs concurrently.
 
@@ -289,9 +368,18 @@ def download_youtube_multi(
     Returns: (success_count, total_count)
     """
     os.makedirs(out_dir, exist_ok=True)
+    if log_fn:
+        ctx = get_youtube_runtime_context(quality, use_cookies)
+        log_fn(
+            "[YouTube] cấu hình multi-url: "
+            f"quality={ctx['quality']} | cookies={ctx['cookies']} | "
+            f"aria2c={'bật' if ctx['using_aria2c'] else 'tắt'} | "
+            f"N={ctx['concurrent_fragments']} | workers={max_workers}",
+            "info",
+        )
 
     def _download_one(single_url: str) -> bool:
-        result = download_youtube_video(single_url, out_dir, quality, progress_hook)
+        result = download_youtube_video(single_url, out_dir, quality, progress_hook, use_cookies=use_cookies)
         if result:
             if log_fn:
                 log_fn(f"Hoàn thành: {os.path.basename(result)}", "ok")
@@ -322,6 +410,7 @@ def download_youtube_channel(
     use_channel_subfolder: bool = True,
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
+    use_cookies: bool = False,
 ) -> tuple[int, int]:
     """Download all (or up to max_videos) videos from a YouTube channel.
 
@@ -337,6 +426,15 @@ def download_youtube_channel(
     Returns: (success_count, total_attempted)
     """
     os.makedirs(out_dir, exist_ok=True)
+    if log_fn:
+        ctx = get_youtube_runtime_context(quality, use_cookies)
+        log_fn(
+            "[YouTube] cấu hình channel: "
+            f"quality={ctx['quality']} | cookies={ctx['cookies']} | "
+            f"aria2c={'bật' if ctx['using_aria2c'] else 'tắt'} | "
+            f"N={ctx['concurrent_fragments']}",
+            "info",
+        )
     final_out = out_dir
 
     # ── Resolve channel name for sub-folder ──────────────────────────────────
@@ -347,7 +445,8 @@ def download_youtube_channel(
             "extract_flat":   True,
             "playlist_items": "1",
         }
-        opts_info.update(_cookies_opt())
+        if use_cookies:
+            opts_info.update(_cookies_opt())
         try:
             with yt_dlp.YoutubeDL(opts_info) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -367,7 +466,7 @@ def download_youtube_channel(
             pass  # fallback to out_dir on any error
 
     # ── Build download options ────────────────────────────────────────────────
-    opts = _build_ydl_opts(final_out, quality, progress_hook)
+    opts = _build_ydl_opts(final_out, quality, progress_hook, use_cookies)
     if max_videos:
         opts["playlistend"] = max_videos
 
@@ -414,13 +513,7 @@ def get_video_info(url: str) -> dict | None:
         "no_warnings":     True,
         "skip_download":   True,
         "nocheckcertificate": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["web_creator", "ios", "android"],
-            }
-        },
     }
-    opts.update(_cookies_opt())
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)

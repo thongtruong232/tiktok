@@ -1,6 +1,7 @@
 import os
 import json
 import queue
+import time
 import threading
 import tkinter as _tk               # used ONLY for file dialogs
 from datetime import datetime
@@ -13,7 +14,7 @@ import dearpygui.dearpygui as dpg
 from tiktok_download import download_tiktok_video, download_from_profile
 from youtube_download import (download_youtube_video, download_youtube_playlist,
                                download_youtube_multi, download_youtube_channel,
-                               QUALITY_OPTIONS)
+                               QUALITY_OPTIONS, get_youtube_runtime_context)
 import video_edit
 
 # ── Hidden Tk root (file dialogs only) ────────────────────────────────────────
@@ -58,6 +59,7 @@ class App:
         self._dlg_queue: queue.Queue        = queue.Queue()
         self._log_items: list[str]          = []
         self._log_counter: int              = 0
+        self._activity_id: int              = 0
         self._logo_texture: str | None      = None   # logo texture tag (if loaded)
         # ── Edit / Batch state ────────────────────────────────────────────
         self._current_edit_tab: str         = "Resize"   # tracks selected tab
@@ -546,18 +548,31 @@ class App:
                                     width=160)
 
                         dpg.add_spacer(height=8)
-                        with dpg.child_window(height=52, border=True, indent=16):
+                        with dpg.child_window(height=90, border=True, indent=16):
                             with dpg.group(horizontal=True):
-                                cookies_exist = os.path.exists(
-                                    os.path.join(os.path.dirname(__file__), "cookies.txt"))
-                                _co = _CL_OK if cookies_exist else _CL_ERR
-                                _ct = "✓ Đã có cookies.txt  (chất lượng cao nhất)" if cookies_exist \
-                                    else "✗ Chưa có cookies.txt  (giới hạn ở 360p)"
+                                dpg.add_checkbox(
+                                    tag="yt_use_cookies", default_value=False,
+                                    label="")
+                                dpg.add_text("SỬ DỤNG COOKIES", color=_CF2)
+                                dpg.add_spacer(width=16)
+                                from youtube_download import _validate_cookies_file as _vcf
+                                _cf = os.path.join(os.path.dirname(__file__), "cookies.txt")
+                                cookies_valid = _vcf(_cf)
+                                _co = _CL_OK if cookies_valid else (200, 80, 80, 255)
+                                _ct = "✓ cookies.txt sẵn sàng" if cookies_valid \
+                                    else "✗ Chưa có cookies.txt"
                                 dpg.add_text(_ct, tag="yt_cookie_status",
-                                             color=_co, indent=16)
+                                             color=_co)
                                 dpg.add_spacer(width=10)
                                 dpg.add_button(label="Chọn cookies.txt...", width=160,
                                                callback=self._yt_import_cookies)
+                            dpg.add_text(
+                                "  Cookies chỉ cần cho video giới hạn tuổi / thành viên. "
+                                "Video công khai KHÔNG cần bật cookies.",
+                                color=_CF3, indent=16)
+                            dpg.add_text(
+                                "  ⚠ Bật cookies yêu cầu deno JS runtime (xem yt-dlp wiki/EJS).",
+                                color=(239, 190, 60, 255), indent=16)
                         dpg.add_spacer(height=8)
 
                 dpg.add_spacer(height=14)
@@ -1532,7 +1547,8 @@ class App:
     def _log(self, text: str, tag: str = "info"):
         ts     = datetime.now().strftime("%H:%M:%S")
         colors = {"ok": _CL_OK, "err": _CL_ERR, "info": _CL_INFO}
-        self._log_queue.put((f"[{ts}] {text}", colors.get(tag, _CF)))
+        icon_map = {"ok": "✓", "err": "✗", "info": "•"}
+        self._log_queue.put((f"[{ts}] {icon_map.get(tag, '•')} {text}", colors.get(tag, _CF)))
         try:
             dpg.set_value("status_txt", text[:55])
         except Exception:
@@ -1787,8 +1803,12 @@ class App:
         platform = self._current_dl_platform   # "tiktok" | "youtube"
         out = dpg.get_value("dl_out").strip() or "downloads"
 
+        self._activity_id += 1
+        act = self._activity_id
+
         if platform == "tiktok":
             mode = dpg.get_value("dl_mode")
+            self._log(f"[Activity #{act}] Bắt đầu tác vụ tải TikTok | mode={mode}", "info")
             if mode == "Single Video":
                 url = dpg.get_value("url_single").strip()
                 if not url:
@@ -1811,24 +1831,35 @@ class App:
         else:  # youtube
             yt_mode = dpg.get_value("yt_mode")
             quality = dpg.get_value("yt_quality") or "best"
+            use_cookies = dpg.get_value("yt_use_cookies")
+            yt_ctx = get_youtube_runtime_context(quality, use_cookies)
+            self._log(
+                f"[Activity #{act}] Bắt đầu tác vụ tải YouTube | mode={yt_mode}",
+                "info",
+            )
+            self._log(
+                f"[Activity #{act}] quality={quality} | cookies={yt_ctx['cookies']} | "
+                f"aria2c={'bật' if yt_ctx['using_aria2c'] else 'tắt'}",
+                "info",
+            )
             if yt_mode == "Video đơn":
                 url = dpg.get_value("yt_url_single").strip()
                 if not url:
                     self._log("Vui lòng nhập URL video YouTube.", "err"); return
-                targets = [("yt_single", (url, quality))]
+                targets = [("yt_single", (url, quality, use_cookies))]
             elif yt_mode == "Playlist":
                 url = dpg.get_value("yt_playlist_url").strip()
                 if not url:
                     self._log("Vui lòng nhập URL playlist / channel.", "err"); return
                 mv    = dpg.get_value("yt_max_items").strip()
                 max_v = int(mv) if mv.isdigit() else None
-                targets = [("yt_playlist", (url, quality, max_v))]
+                targets = [("yt_playlist", (url, quality, max_v, use_cookies))]
             elif yt_mode == "Nhiều URLs":
                 raw  = dpg.get_value("yt_multi_text")
                 urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
                 if not urls:
                     self._log("Vui lòng nhập ít nhất một URL.", "err"); return
-                targets = [("yt_multi", (urls, quality))]
+                targets = [("yt_multi", (urls, quality, use_cookies))]
             else:  # Kênh
                 url = dpg.get_value("yt_channel_url").strip()
                 if not url:
@@ -1836,28 +1867,42 @@ class App:
                 mv          = dpg.get_value("yt_ch_max").strip()
                 max_v       = int(mv) if mv.isdigit() else None
                 use_subfol  = dpg.get_value("yt_ch_subfolder")
-                targets = [("yt_channel", (url, quality, max_v, use_subfol))]
+                targets = [("yt_channel", (url, quality, max_v, use_subfol, use_cookies))]
 
         if not os.path.exists(out):
             try:
                 os.makedirs(out)
+                self._log(f"[Activity #{act}] Tạo thư mục output: {out}", "ok")
             except Exception as e:
                 self._log(f"Không thể tạo thư mục: {e}", "err"); return
+        else:
+            self._log(f"[Activity #{act}] Output: {os.path.abspath(out)}", "info")
 
         dpg.configure_item("dl_btn", enabled=False)
         dpg.set_value("dl_prog", 0.0)
-        threading.Thread(target=self._worker, args=(targets, out),
+        threading.Thread(target=self._worker, args=(targets, out, act),
                          daemon=True).start()
 
-    def _worker(self, targets, out):
+    def _worker(self, targets, out, act: int):
+        started = time.perf_counter()
+        last_pct = -1
+
         def _prog_hook(d):
             """yt-dlp progress callback → update progress bar."""
+            nonlocal last_pct
             try:
                 if d.get("status") == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                     downloaded = d.get("downloaded_bytes", 0)
                     if total > 0:
-                        dpg.set_value("dl_prog", downloaded / total)
+                        progress = downloaded / total
+                        dpg.set_value("dl_prog", progress)
+                        pct = int(progress * 100)
+                        if pct >= 0 and (pct // 10) > (last_pct // 10):
+                            last_pct = pct
+                            self._log(f"[Activity #{act}] Tiến độ tải: {pct}%", "info")
+                elif d.get("status") == "finished":
+                    dpg.set_value("dl_prog", 1.0)
             except Exception:
                 pass
 
@@ -1891,39 +1936,39 @@ class App:
 
                 # ── YouTube ───────────────────────────────────────────────────
                 elif kind == "yt_single":
-                    url, quality = payload
+                    url, quality, use_cookies = payload
                     self._log(f"[YouTube] Đang tải ({quality}): {url}", "info")
-                    fn = download_youtube_video(url, out, quality, _prog_hook)
+                    fn = download_youtube_video(url, out, quality, _prog_hook, self._log, use_cookies)
                     self._log(
                         f"Hoàn thành: {os.path.basename(fn)}" if fn
                         else f"Thất bại: {url}",
                         "ok" if fn else "err")
 
                 elif kind == "yt_playlist":
-                    url, quality, max_v = payload
+                    url, quality, max_v, use_cookies = payload
                     self._log(f"[YouTube] Đang tải playlist ({quality}): {url}", "info")
                     ok_n, total = download_youtube_playlist(
-                        url, out, quality, max_v, _prog_hook, self._log)
+                        url, out, quality, max_v, _prog_hook, self._log, use_cookies)
                     self._log(
                         f"Playlist hoàn thành: {ok_n}/{total} video.",
                         "ok" if ok_n > 0 else "err")
 
                 elif kind == "yt_multi":
-                    urls, quality = payload
+                    urls, quality, use_cookies = payload
                     self._log(f"[YouTube] Đang tải {len(urls)} URL ({quality})...", "info")
                     ok_n, total = download_youtube_multi(
-                        urls, out, quality, _prog_hook, self._log)
+                        urls, out, quality, _prog_hook, self._log, use_cookies=use_cookies)
                     self._log(
                         f"Hoàn thành: {ok_n}/{total} video.",
                         "ok" if ok_n > 0 else "err")
 
                 elif kind == "yt_channel":
-                    url, quality, max_v, use_subfol = payload
+                    url, quality, max_v, use_subfol, use_cookies = payload
                     self._log(f"[YouTube] Đang tải kênh ({quality}): {url}", "info")
                     if max_v:
                         self._log(f"Giới hạn: {max_v} video đầu tiên.", "info")
                     ok_n, total = download_youtube_channel(
-                        url, out, quality, max_v, use_subfol, _prog_hook, self._log)
+                        url, out, quality, max_v, use_subfol, _prog_hook, self._log, use_cookies)
                     self._log(
                         f"Kênh hoàn thành: {ok_n} video đã tải.",
                         "ok" if ok_n > 0 else "err")
@@ -1931,6 +1976,8 @@ class App:
         except Exception as e:
             self._log(f"Lỗi: {e}", "err")
         finally:
+            elapsed = time.perf_counter() - started
+            self._log(f"[Activity #{act}] Kết thúc tác vụ tải ({elapsed:.1f}s)", "ok")
             try:
                 dpg.configure_item("dl_btn", enabled=True)
                 dpg.set_value("dl_prog", 0.0)
