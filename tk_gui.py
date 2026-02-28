@@ -556,18 +556,15 @@ class App:
                                 dpg.add_text("SỬ DỤNG COOKIES", color=_CF2)
                                 dpg.add_spacer(width=16)
                                 from youtube_download import _validate_cookies_file as _vcf
-                                _cf = os.path.join(os.path.dirname(__file__), "cookies.txt")
+                                _cf = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
                                 cookies_valid = _vcf(_cf)
                                 _co = _CL_OK if cookies_valid else (200, 80, 80, 255)
-                                _ct = "✓ cookies.txt sẵn sàng" if cookies_valid \
-                                    else "✗ Chưa có cookies.txt"
+                                _ct = "✓ youtube_cookies.txt sẵn sàng" if cookies_valid \
+                                    else "✗ Chưa có youtube_cookies.txt"
                                 dpg.add_text(_ct, tag="yt_cookie_status",
                                              color=_co)
-                                dpg.add_spacer(width=10)
-                                dpg.add_button(label="Chọn cookies.txt...", width=160,
-                                               callback=self._yt_import_cookies)
                             dpg.add_text(
-                                "  Cookies chỉ cần cho video giới hạn tuổi / thành viên. "
+                                "  Đặt file youtube_cookies.txt vào thư mục gốc ứng dụng. "
                                 "Video công khai KHÔNG cần bật cookies.",
                                 color=_CF3, indent=16)
                             dpg.add_text(
@@ -1492,7 +1489,7 @@ class App:
                     elif cmd == "_yt_cookie_ok":
                         # Update cookie status indicator in the UI
                         try:
-                            dpg.set_value("yt_cookie_status", "✓ Đã có cookies.txt")
+                            dpg.set_value("yt_cookie_status", "✓ Đã có youtube_cookies.txt")
                             dpg.configure_item("yt_cookie_status", color=_CL_OK)
                         except Exception:
                             pass
@@ -1633,50 +1630,6 @@ class App:
 
     def _browse_files_to_list(self, listbox: str, filetypes):
         self._start_dialog_thread('open_multi', listbox, filetypes)
-
-    def _yt_import_cookies(self):
-        """Let user pick a cookies.txt file and copy it to the project folder."""
-        def _worker():
-            import shutil
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                path = filedialog.askopenfilename(
-                    parent=root,
-                    title="Chọn file cookies.txt (Netscape format)",
-                    filetypes=[("Cookies file", "*.txt"), ("All files", "*.*")])
-            except Exception:
-                path = None
-            finally:
-                try:
-                    root.destroy()
-                except Exception:
-                    pass
-            if not path:
-                return
-            dest = os.path.join(os.path.dirname(__file__), "cookies.txt")
-            try:
-                src_abs = os.path.abspath(path)
-                dest_abs = os.path.abspath(dest)
-
-                same_path = os.path.normcase(src_abs) == os.path.normcase(dest_abs)
-                if not same_path and os.path.exists(dest_abs):
-                    try:
-                        same_path = os.path.samefile(src_abs, dest_abs)
-                    except Exception:
-                        same_path = False
-
-                if same_path:
-                    self._log("cookies.txt đã ở đúng vị trí, không cần import lại.", "info")
-                else:
-                    shutil.copy2(src_abs, dest_abs)
-                    self._log("Cookies đã được import. Tải lại app để áp dụng.", "ok")
-                self._dlg_queue.put(("_yt_cookie_ok", dest))
-            except Exception as e:
-                self._log(f"Lỗi import cookies: {e}", "err")
-        threading.Thread(target=_worker, daemon=True).start()
 
     def _browse_edit_in(self):
         self._browse_file_single("edit_in",

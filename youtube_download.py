@@ -52,7 +52,7 @@ MAX_CONCURRENT_DOWNLOADS = 3
 
 
 # ── Cookies auto-detection ─────────────────────────────────────────────────────
-_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_cookies.txt")
 
 # Cache cookie option so browser DB is probed only once per session
 _cached_cookies: dict | None = None
@@ -63,7 +63,7 @@ def _cookie_status_text() -> str:
     """Return human-readable cookie usage status."""
     opt = _cookies_opt()
     if "cookiefile" in opt:
-        return "cookies.txt"
+        return "youtube_cookies.txt"
     if "cookiesfrombrowser" in opt:
         browser = opt["cookiesfrombrowser"][0] if opt["cookiesfrombrowser"] else "browser"
         return f"browser:{browser}"

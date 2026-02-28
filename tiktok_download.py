@@ -5,9 +5,13 @@ import requests
 
 
 # ── Shared yt-dlp options for TikTok (applied to all functions) ───────────────
+# TikTok cookie file — auto-detected from project folder
+_TT_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tiktok_cookies.txt')
+
+
 def _build_tt_opts(output_path: str, extra: dict | None = None,
                    progress_hook=None) -> dict:
-    cookies = 'cookies.txt' if os.path.exists('cookies.txt') else None
+    cookies = _TT_COOKIE_FILE if os.path.exists(_TT_COOKIE_FILE) else None
     opts: dict = {
         'format':       'bestvideo+bestaudio/best',  # prefer separate streams → higher quality
         'outtmpl':      os.path.join(output_path, '%(title)s.%(ext)s'),
@@ -49,7 +53,7 @@ def _resolve_channel_id(profile_url: str) -> str | None:
       2. If not found, try each video URL on the page until one yields a
          channel_id (some videos may be login-gated).
     """
-    cookies_file = 'cookies.txt' if os.path.exists('cookies.txt') else None
+    cookies_file = _TT_COOKIE_FILE if os.path.exists(_TT_COOKIE_FILE) else None
 
     headers = {
         'User-Agent': (
