@@ -12,7 +12,8 @@ import dearpygui.dearpygui as dpg
 
 from tiktok_download import download_tiktok_video, download_from_profile
 from youtube_download import (download_youtube_video, download_youtube_playlist,
-                               download_youtube_multi, download_youtube_channel)
+                               download_youtube_multi, download_youtube_channel,
+                               QUALITY_OPTIONS)
 import video_edit
 
 # ── Hidden Tk root (file dialogs only) ────────────────────────────────────────
@@ -533,7 +534,18 @@ class App:
                                              default_value=True, indent=16)
                         dpg.hide_item("yt_card_channel")
 
-                        dpg.add_spacer(height=14)
+                        dpg.add_spacer(height=10)
+                        with dpg.child_window(height=52, border=True, indent=16):
+                            with dpg.group(horizontal=True):
+                                dpg.add_text("CHẤT LƯỢNG:", color=_CF2, indent=16)
+                                dpg.add_spacer(width=8)
+                                dpg.add_combo(
+                                    tag="yt_quality",
+                                    items=QUALITY_OPTIONS,
+                                    default_value="best",
+                                    width=160)
+
+                        dpg.add_spacer(height=8)
                         with dpg.child_window(height=52, border=True, indent=16):
                             with dpg.group(horizontal=True):
                                 cookies_exist = os.path.exists(
@@ -1630,8 +1642,21 @@ class App:
                 return
             dest = os.path.join(os.path.dirname(__file__), "cookies.txt")
             try:
-                shutil.copy2(path, dest)
-                self._log("Cookies đã được import. Tải lại app để áp dụng.", "ok")
+                src_abs = os.path.abspath(path)
+                dest_abs = os.path.abspath(dest)
+
+                same_path = os.path.normcase(src_abs) == os.path.normcase(dest_abs)
+                if not same_path and os.path.exists(dest_abs):
+                    try:
+                        same_path = os.path.samefile(src_abs, dest_abs)
+                    except Exception:
+                        same_path = False
+
+                if same_path:
+                    self._log("cookies.txt đã ở đúng vị trí, không cần import lại.", "info")
+                else:
+                    shutil.copy2(src_abs, dest_abs)
+                    self._log("Cookies đã được import. Tải lại app để áp dụng.", "ok")
                 self._dlg_queue.put(("_yt_cookie_ok", dest))
             except Exception as e:
                 self._log(f"Lỗi import cookies: {e}", "err")
@@ -1785,24 +1810,25 @@ class App:
 
         else:  # youtube
             yt_mode = dpg.get_value("yt_mode")
+            quality = dpg.get_value("yt_quality") or "best"
             if yt_mode == "Video đơn":
                 url = dpg.get_value("yt_url_single").strip()
                 if not url:
                     self._log("Vui lòng nhập URL video YouTube.", "err"); return
-                targets = [("yt_single", url)]
+                targets = [("yt_single", (url, quality))]
             elif yt_mode == "Playlist":
                 url = dpg.get_value("yt_playlist_url").strip()
                 if not url:
                     self._log("Vui lòng nhập URL playlist / channel.", "err"); return
                 mv    = dpg.get_value("yt_max_items").strip()
                 max_v = int(mv) if mv.isdigit() else None
-                targets = [("yt_playlist", (url, max_v))]
+                targets = [("yt_playlist", (url, quality, max_v))]
             elif yt_mode == "Nhiều URLs":
                 raw  = dpg.get_value("yt_multi_text")
                 urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
                 if not urls:
                     self._log("Vui lòng nhập ít nhất một URL.", "err"); return
-                targets = [("yt_multi", urls)]
+                targets = [("yt_multi", (urls, quality))]
             else:  # Kênh
                 url = dpg.get_value("yt_channel_url").strip()
                 if not url:
@@ -1810,7 +1836,7 @@ class App:
                 mv          = dpg.get_value("yt_ch_max").strip()
                 max_v       = int(mv) if mv.isdigit() else None
                 use_subfol  = dpg.get_value("yt_ch_subfolder")
-                targets = [("yt_channel", (url, max_v, use_subfol))]
+                targets = [("yt_channel", (url, quality, max_v, use_subfol))]
 
         if not os.path.exists(out):
             try:
@@ -1866,7 +1892,7 @@ class App:
                 # ── YouTube ───────────────────────────────────────────────────
                 elif kind == "yt_single":
                     url, quality = payload
-                    self._log(f"[YouTube] Đang tải: {url}", "info")
+                    self._log(f"[YouTube] Đang tải ({quality}): {url}", "info")
                     fn = download_youtube_video(url, out, quality, _prog_hook)
                     self._log(
                         f"Hoàn thành: {os.path.basename(fn)}" if fn
@@ -1875,7 +1901,7 @@ class App:
 
                 elif kind == "yt_playlist":
                     url, quality, max_v = payload
-                    self._log(f"[YouTube] Đang tải playlist: {url}", "info")
+                    self._log(f"[YouTube] Đang tải playlist ({quality}): {url}", "info")
                     ok_n, total = download_youtube_playlist(
                         url, out, quality, max_v, _prog_hook, self._log)
                     self._log(
@@ -1884,7 +1910,7 @@ class App:
 
                 elif kind == "yt_multi":
                     urls, quality = payload
-                    self._log(f"[YouTube] Đang tải {len(urls)} URL...", "info")
+                    self._log(f"[YouTube] Đang tải {len(urls)} URL ({quality})...", "info")
                     ok_n, total = download_youtube_multi(
                         urls, out, quality, _prog_hook, self._log)
                     self._log(
@@ -1893,7 +1919,7 @@ class App:
 
                 elif kind == "yt_channel":
                     url, quality, max_v, use_subfol = payload
-                    self._log(f"[YouTube] Đang tải kênh: {url}", "info")
+                    self._log(f"[YouTube] Đang tải kênh ({quality}): {url}", "info")
                     if max_v:
                         self._log(f"Giới hạn: {max_v} video đầu tiên.", "info")
                     ok_n, total = download_youtube_channel(
