@@ -48,15 +48,16 @@ QUALITY_OPTIONS: list[str] = [
 ]
 
 _QUALITY_FORMATS: dict[str, str] = {
-    # Always require audio track — fallback chain: DASH split → combined with audio → any
-    "best":  "bestvideo+bestaudio/best[acodec!=none]/best",
-    "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160][acodec!=none]/best[height<=2160]",
-    "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440][acodec!=none]/best[height<=1440]",
-    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080][acodec!=none]/best[height<=1080]",
-    "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720][acodec!=none]/best[height<=720]",
-    "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480][acodec!=none]/best[height<=480]",
-    "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360][acodec!=none]/best[height<=360]",
-    "audio": "bestaudio[ext=m4a]/bestaudio/best[acodec!=none]",
+    # Fallback chain: separate streams (DASH, needs ffmpeg merge)
+    #   → combined format at quality → absolute best combined → anything
+    "best":  "bestvideo+bestaudio/best",
+    "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+    "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
+    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+    "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+    "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+    "audio": "bestaudio[ext=m4a]/bestaudio/best",
 }
 
 # Max concurrent video downloads for multi-URL / playlist modes
@@ -211,25 +212,9 @@ def _build_ydl_opts(
 
         # ── Concurrent fragment downloads (yt-dlp -N) ─────────────────────
         "concurrent_fragment_downloads": 8,
-
-        # ── Format sorting: resolution first, then prefer streams with audio
-        "format_sort": [
-            "res",
-            "hdr:12",
-            "fps",
-            "hasaud",          # prefer formats that already have audio
-            "vcodec:vp9.2",
-            "vcodec:av01",
-            "vcodec:vp9",
-            "vcodec:h265",
-            "vcodec:h264",
-            "channels",
-            "acodec:opus",
-            "acodec:aac",
-            "br",
-            "asr",
-            "size",
-        ],
+        # format_sort intentionally omitted — it conflicts with explicit format
+        # strings and causes "Requested format is not available" errors.
+        # The format string above already encodes all quality/fallback logic.
     }
 
     # Remove keys with None values
