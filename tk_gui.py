@@ -62,6 +62,7 @@ class App:
         self._dlg_queue: queue.Queue        = queue.Queue()
         self._log_items: list[str]          = []
         self._log_counter: int              = 0
+        self._live_progress_tag: str | None = None   # tag of in-place progress line
         self._activity_id: int              = 0
         self._logo_texture: str | None      = None   # logo texture tag (if loaded)
         # ── Edit / Batch state ────────────────────────────────────────────
@@ -109,6 +110,7 @@ class App:
         # ── Check FFmpeg availability ─────────────────────────────────────
         if not video_edit.check_ffmpeg():
             self._log_queue.put((
+                "log",
                 "[Cảnh báo] FFmpeg không tìm thấy trên PATH. "
                 "Chức năng chỉnh sửa video sẽ không hoạt động.",
                 (239, 190, 60, 255),
@@ -147,8 +149,13 @@ class App:
         dpg.set_primary_window("main_win", True)
         dpg.set_viewport_resize_callback(self._on_resize)
         dpg.show_viewport()
-        dpg.set_frame_callback(2, self._process_log_queue)   # start log pump
-        dpg.start_dearpygui()
+        # ── Manual render loop — process log/UI queue on every frame ─────
+        # Using dpg.render_dearpygui_frame() instead of start_dearpygui()
+        # guarantees _process_log_queue() runs reliably each frame without
+        # depending on fragile set_frame_callback re-registration.
+        while dpg.is_dearpygui_running():
+            self._process_log_queue()
+            dpg.render_dearpygui_frame()
         dpg.destroy_context()
 
     # ── Fonts ──────────────────────────────────────────────────────────────────
@@ -1553,75 +1560,112 @@ class App:
                                      callback=self._clear_log)
                 dpg.bind_item_theme(clr, "th_accent")
 
-    # ── Log queue pump (called every frame from render thread) ─────────────────
+    # ── Log queue pump (called every frame from the manual render loop) ──────
+    # Message kinds in _log_queue:
+    #   ("log",      text, color)  → add a new log line
+    #   ("progress", text, color)  → in-place update or create live progress line
+    #   ("status",   text)         → update status_txt only (no log line)
+    #   ("ui",       callable)     → run an arbitrary DPG call on render thread
+    _MAX_BATCH = 40   # max items consumed per frame to avoid stalling the UI
+
     def _process_log_queue(self, *_):
-        while not self._log_queue.empty():
+        # ── Log queue ─────────────────────────────────────────────────────
+        n = 0
+        while n < self._MAX_BATCH and not self._log_queue.empty():
             try:
-                text, color = self._log_queue.get_nowait()
-                self._add_log_entry(text, color)
+                item = self._log_queue.get_nowait()
             except queue.Empty:
                 break
-        # Process pending dialog results (from worker threads)
+            try:
+                kind = item[0]
+                if kind == "log":
+                    _, text, color = item
+                    self._add_log_entry(text, color)
+                elif kind == "progress":
+                    _, text, color = item
+                    self._update_progress_entry(text, color)
+                elif kind == "status":
+                    _, text = item
+                    dpg.set_value("status_txt", text)
+                elif kind == "ui":
+                    _, fn = item
+                    fn()
+            except Exception:
+                pass   # never let a single bad message kill the pump
+            n += 1
+        # ── Dialog result queue ───────────────────────────────────────────
         while not self._dlg_queue.empty():
             try:
                 item = self._dlg_queue.get_nowait()
                 if not item:
                     continue
-
-                # Library-specific 2-tuple messages
-                if len(item) == 2:
-                    cmd, payload = item
-                    if cmd == "lib_root_set":
-                        self._lib_root = os.path.abspath(payload)
-                        dpg.set_value("lib_root_input", self._lib_root)
-                        self._lib_refresh_folders()
-                    elif cmd == "lib_new_folder":
-                        new_path = os.path.join(self._lib_root, payload)
-                        try:
-                            os.makedirs(new_path, exist_ok=True)
-                            self._log(f"Đã tạo thư mục: {payload}", "ok")
-                            self._lib_refresh_folders()
-                        except Exception as e:
-                            self._log(f"Không thể tạo thư mục: {e}", "err")
-                    elif cmd == "lib_upload":
-                        self._lib_process_upload(payload)
-                    continue
-
-                mode, target, res = item
-                if not res:
-                    continue
-                if mode in ('open', 'save', 'dir'):
-                    try:
-                        dpg.set_value(target, res)
-                    except Exception:
-                        pass
-                elif mode == 'open_multi':
-                    try:
-                        new_files = list(res)
-                        if target == '__merge__':
-                            # add to app-side list, sync to listbox
-                            for f in new_files:
-                                if f not in self._merge_items:
-                                    self._merge_items.append(f)
-                            dpg.configure_item("merge_list",
-                                               items=list(self._merge_items))
-                        elif target == '__batch__':
-                            for f in new_files:
-                                if f not in self._batch_items:
-                                    self._batch_items.append(f)
-                            self._refresh_batch_list_display()
-                        else:
-                            # generic listbox fallback
-                            dpg.configure_item(target, items=new_files)
-                    except Exception:
-                        pass
+                self._handle_dlg_item(item)
             except queue.Empty:
                 break
-        if dpg.is_dearpygui_running():
-            dpg.set_frame_callback(dpg.get_frame_count() + 1,
-                                   self._process_log_queue)
+            except Exception:
+                pass   # never let one bad dialog result kill the pump
+        # NOTE: no set_frame_callback re-registration needed —
+        # this method is called directly in the manual render loop.
+
+    def _handle_dlg_item(self, item):
+        """Process a single dialog-result tuple from _dlg_queue."""
+        # Library-specific 2-tuple messages
+        if len(item) == 2:
+            cmd, payload = item
+            if cmd == "lib_root_set":
+                self._lib_root = os.path.abspath(payload)
+                dpg.set_value("lib_root_input", self._lib_root)
+                self._lib_refresh_folders()
+            elif cmd == "lib_new_folder":
+                new_path = os.path.join(self._lib_root, payload)
+                try:
+                    os.makedirs(new_path, exist_ok=True)
+                    self._log(f"Đã tạo thư mục: {payload}", "ok")
+                    self._lib_refresh_folders()
+                except Exception as e:
+                    self._log(f"Không thể tạo thư mục: {e}", "err")
+            elif cmd == "lib_upload":
+                self._lib_process_upload(payload)
+            return
+
+        mode, target, res = item
+        if not res:
+            return
+        if mode in ('open', 'save', 'dir'):
+            try:
+                dpg.set_value(target, res)
+            except Exception:
+                pass
+        elif mode == 'open_multi':
+            try:
+                new_files = list(res)
+                if target == '__merge__':
+                    for f in new_files:
+                        if f not in self._merge_items:
+                            self._merge_items.append(f)
+                    dpg.configure_item("merge_list",
+                                       items=list(self._merge_items))
+                elif target == '__batch__':
+                    for f in new_files:
+                        if f not in self._batch_items:
+                            self._batch_items.append(f)
+                    self._refresh_batch_list_display()
+                else:
+                    dpg.configure_item(target, items=new_files)
+            except Exception:
+                pass
 
     def _add_log_entry(self, text: str, color: tuple):
+        """Add a new log line.  Removes any live-progress line first so the
+        finished/error message always appears below it cleanly."""
+        # Move the live-progress line out of the way — it will be replaced by
+        # the real result line being added now.
+        if self._live_progress_tag and dpg.does_item_exist(self._live_progress_tag):
+            dpg.delete_item(self._live_progress_tag)
+            if self._live_progress_tag in self._log_items:
+                self._log_items.remove(self._live_progress_tag)
+        self._live_progress_tag = None
+
         tag = f"ll_{self._log_counter}"
         self._log_counter += 1
         dpg.add_text(text, tag=tag, color=color,
@@ -1633,22 +1677,47 @@ class App:
                 dpg.delete_item(old)
         dpg.set_y_scroll("log_content", dpg.get_y_scroll_max("log_content"))
 
+    def _update_progress_entry(self, text: str, color: tuple):
+        """Update the live-progress line in-place.  Creates it on first call;
+        subsequent calls overwrite the same DPG text item."""
+        if self._live_progress_tag and dpg.does_item_exist(self._live_progress_tag):
+            dpg.configure_item(self._live_progress_tag, default_value=text, color=color)
+        else:
+            tag = f"ll_{self._log_counter}"
+            self._log_counter += 1
+            dpg.add_text(text, tag=tag, color=color,
+                         parent="log_content", wrap=_LOG_W - 36)
+            self._live_progress_tag = tag
+            self._log_items.append(tag)
+            while len(self._log_items) > _MAX_LOG:
+                old = self._log_items.pop(0)
+                if old == self._live_progress_tag:
+                    self._live_progress_tag = None
+                if dpg.does_item_exist(old):
+                    dpg.delete_item(old)
+        dpg.set_y_scroll("log_content", dpg.get_y_scroll_max("log_content"))
+
     def _log(self, text: str, tag: str = "info"):
-        ts     = datetime.now().strftime("%H:%M:%S")
-        colors = {"ok": _CL_OK, "err": _CL_ERR, "info": _CL_INFO}
+        """Thread-safe log producer.  All DPG mutations are deferred to the
+        render thread via _log_queue — never touch DPG directly here."""
+        ts       = datetime.now().strftime("%H:%M:%S")
+        colors   = {"ok": _CL_OK, "err": _CL_ERR, "info": _CL_INFO}
         icon_map = {"ok": "✓", "err": "✗", "info": "•"}
-        self._log_queue.put((f"[{ts}] {icon_map.get(tag, '•')} {text}", colors.get(tag, _CF)))
-        try:
-            dpg.set_value("status_txt", text[:80])
-        except Exception:
-            pass
+        color    = colors.get(tag, _CF)
+        self._log_queue.put(("log",    f"[{ts}] {icon_map.get(tag, '•')} {text}", color))
+        self._log_queue.put(("status", text[:80]))
 
     def _clear_log(self):
+        """Clear all log items.  Called from button callback (render thread)."""
+        self._live_progress_tag = None
         for tag in self._log_items:
             if dpg.does_item_exist(tag):
                 dpg.delete_item(tag)
         self._log_items.clear()
-        dpg.set_value("status_txt", "Ready")
+        try:
+            dpg.set_value("status_txt", "Ready")
+        except Exception:
+            pass
 
     # ── Viewport resize ────────────────────────────────────────────────────────
     def _on_resize(self):
@@ -1950,25 +2019,63 @@ class App:
                          daemon=True).start()
 
     def _worker(self, targets, out, act: int):
-        started = time.perf_counter()
-        last_pct = -1
+        started    = time.perf_counter()
+        last_pct   = -1
+        last_prog_t = 0.0   # monotonic time of last progress enqueue
 
         def _prog_hook(d):
-            """yt-dlp progress callback → update progress bar."""
-            nonlocal last_pct
+            """yt-dlp progress callback → all DPG mutations via queue (thread-safe).
+
+            Formats progress like yt-dlp terminal output:
+              [download]   8.6% of  46.35MiB at  2.41MiB/s ETA 00:17
+              [download] 100% of  46.35MiB in 00:19
+            """
+            nonlocal last_pct, last_prog_t
             try:
-                if d.get("status") == "downloading":
+                status = d.get("status")
+                if status == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                    downloaded = d.get("downloaded_bytes", 0)
-                    if total > 0:
-                        progress = downloaded / total
-                        dpg.set_value("dl_prog", progress)
-                        pct = int(progress * 100)
-                        if pct >= 0 and (pct // 10) > (last_pct // 10):
-                            last_pct = pct
-                            self._log(f"[Activity #{act}] Tiến độ tải: {pct}%", "info")
-                elif d.get("status") == "finished":
-                    dpg.set_value("dl_prog", 1.0)
+                    dl    = d.get("downloaded_bytes", 0)
+                    now   = time.perf_counter()
+                    pct   = int(dl / total * 100) if total > 0 else 0
+                    # Throttle: enqueue at most once per 0.25s OR per 3% change
+                    if now - last_prog_t >= 0.25 or abs(pct - last_pct) >= 3:
+                        last_pct    = pct
+                        last_prog_t = now
+                        # Use yt-dlp pre-formatted strings when available
+                        pct_s   = d.get("_percent_str",  f"{pct:5.1f}%").strip()
+                        total_s = (d.get("_total_bytes_str")
+                                   or d.get("_total_bytes_estimate_str")
+                                   or "~").strip()
+                        spd_s   = d.get("_speed_str", "").strip()
+                        eta_s   = d.get("_eta_str",   "").strip()
+                        # Build terminal-style line
+                        line = f"[download] {pct_s} of {total_s}"
+                        if spd_s and spd_s not in ("N/A", "Unknown"):
+                            line += f" at {spd_s}"
+                        if eta_s and eta_s not in ("N/A", "Unknown"):
+                            line += f" ETA {eta_s}"
+                        self._log_queue.put(("progress", line, _CL_INFO))
+                        self._log_queue.put(("status", line))
+                        if total > 0:
+                            p = dl / total
+                            self._log_queue.put(("ui", lambda _p=p: dpg.set_value("dl_prog", _p)))
+
+                elif status == "finished":
+                    # Log completion with file size (like terminal)
+                    total_s = (d.get("_total_bytes_str")
+                               or d.get("_total_bytes_estimate_str")
+                               or "").strip()
+                    elapsed = d.get("_elapsed_str", "").strip()
+                    fname   = os.path.basename(d.get("filename", ""))
+                    parts   = ["[download] 100%"]
+                    if total_s:
+                        parts.append(f"of {total_s}")
+                    if elapsed:
+                        parts.append(f"in {elapsed}")
+                    self._log_queue.put(("progress", " ".join(parts), _CL_OK))
+                    self._log_queue.put(("ui", lambda: dpg.set_value("dl_prog", 1.0)))
+
             except Exception:
                 pass
 
@@ -2044,13 +2151,13 @@ class App:
         finally:
             elapsed = time.perf_counter() - started
             self._log(f"[Activity #{act}] Kết thúc tác vụ tải ({elapsed:.1f}s)", "ok")
-            try:
-                dpg.set_value("dl_prog", 1.0)
-                time.sleep(1.5)  # show 100% briefly
-                dpg.configure_item("dl_btn", enabled=True)
-                dpg.set_value("dl_prog", 0.0)
-            except Exception:
-                pass
+            # All DPG mutations go through the queue — never call DPG from here.
+            self._log_queue.put(("ui", lambda: dpg.set_value("dl_prog", 1.0)))
+            time.sleep(1.5)   # briefly show full bar (worker thread sleep is fine)
+            self._log_queue.put(("ui", lambda: (
+                dpg.configure_item("dl_btn", enabled=True),
+                dpg.set_value("dl_prog", 0.0),
+            )))
 
     # ── Edit logic ─────────────────────────────────────────────────────────────
     def _apply_edit(self):
@@ -2068,7 +2175,7 @@ class App:
     def _edit_worker(self, tab: str, inp: str, out):
         started = time.perf_counter()
         try:
-            dpg.set_value("edit_prog", 0.15)
+            self._log_queue.put(("ui", lambda: dpg.set_value("edit_prog", 0.15)))
             if "Resize" in tab:
                 w, h = int(dpg.get_value("res_w")), int(dpg.get_value("res_h"))
                 self._log(f"Resize {w}x{h}: {os.path.basename(inp)}", "info")
@@ -2141,18 +2248,17 @@ class App:
                 self._log(f"Logo ({pos}): {os.path.basename(inp)}", "info")
                 result = video_edit.add_logo(inp, logo, pos, cx, cy,
                                              scale, opacity, out)
-            dpg.set_value("edit_prog", 1.0)
+            self._log_queue.put(("ui", lambda: dpg.set_value("edit_prog", 1.0)))
             elapsed = time.perf_counter() - started
             self._log(f"Hoàn thành ({elapsed:.1f}s): {result}", "ok")
         except Exception as e:
             self._log(f"Lỗi edit: {e}", "err")
         finally:
-            try:
-                time.sleep(1.0)  # show completion briefly
-                dpg.configure_item("edit_btn", enabled=True)
-                dpg.set_value("edit_prog", 0.0)
-            except Exception:
-                pass
+            time.sleep(1.0)
+            self._log_queue.put(("ui", lambda: (
+                dpg.configure_item("edit_btn", enabled=True),
+                dpg.set_value("edit_prog", 0.0),
+            )))
 
     # ── Batch logic ────────────────────────────────────────────────────────────
     def _apply_batch(self):
@@ -2254,25 +2360,23 @@ class App:
                     self._log(f"  ✗ Lỗi: {e}", "err")
                     err_count += 1
                 finally:
-                    try:
-                        dpg.set_value("batch_prog", (i + 1) / total)
+                    _i, _ok, _err, _tot = i, ok_count, err_count, total
+                    self._log_queue.put(("ui", lambda i=_i, ok=_ok, er=_err, t=_tot: (
+                        dpg.set_value("batch_prog", (i + 1) / t),
                         dpg.set_value("batch_status",
-                                      f"{i+1}/{total}  —  OK {ok_count}"
-                                      f"   ✗ {err_count}")
-                    except Exception:
-                        pass
+                                      f"{i+1}/{t}  —  OK {ok}   ✗ {er}"),
+                    )))
         finally:
-            try:
-                dpg.configure_item("batch_btn", enabled=True)
-                self._log(
-                    f"Batch xong: {ok_count}/{total} thành công,"
-                    f" {err_count} lỗi.",
-                    "ok" if err_count == 0 else "err")
+            _ok, _err, _tot = ok_count, err_count, total
+            self._log(
+                f"Batch xong: {ok_count}/{total} thành công,"
+                f" {err_count} lỗi.",
+                "ok" if err_count == 0 else "err")
+            self._log_queue.put(("ui", lambda ok=_ok, er=_err, t=_tot: (
+                dpg.configure_item("batch_btn", enabled=True),
                 dpg.set_value("batch_status",
-                              f"Xong — OK {ok_count}   ✗ {err_count}"
-                              f"   / {total} file")
-            except Exception:
-                pass
+                              f"Xong — OK {ok}   ✗ {er}   / {t} file"),
+            )))
 
 
 if __name__ == "__main__":
