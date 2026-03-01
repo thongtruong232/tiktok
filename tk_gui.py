@@ -421,7 +421,7 @@ class App:
                       "Tải video từ nhiều nền tảng")
 
             with dpg.child_window(tag="dl_scroll", width=w, height=h - _HDR_H,
-                                  border=False):
+                                  border=False, no_scrollbar=True):
                 dpg.bind_item_theme("dl_scroll", "th_main")
                 dpg.add_spacer(height=12)
 
@@ -1055,7 +1055,7 @@ class App:
                       "Chỉnh sửa video đơn lẻ với các thao tác FFmpeg")
 
             with dpg.child_window(tag="edit_scroll", width=w, height=h - _HDR_H,
-                                  border=False):
+                                  border=False, no_scrollbar=True):
                 dpg.bind_item_theme("edit_scroll", "th_main")
                 dpg.add_spacer(height=10)
 
@@ -1351,7 +1351,7 @@ class App:
                       "Áp dụng cùng thao tác cho nhiều video cùng lúc")
 
             with dpg.child_window(tag="batch_scroll", width=w, height=h - _HDR_H,
-                                  border=False):
+                                  border=False, no_scrollbar=True):
                 dpg.bind_item_theme("batch_scroll", "th_main")
                 dpg.add_spacer(height=10)
 
