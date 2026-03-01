@@ -24,10 +24,10 @@ _MAX_LOG   = 300   # max log lines kept in panel
 
 # ── Navigation items (page_id, label with icon) ───────────────────────────────
 _NAV_ITEMS = [
-    ("download", "▼  Tải Video"),
-    ("library",  "■  Thư Viện"),
-    ("edit",     "▶  Chỉnh Sửa"),
-    ("batch",    "≡  Batch Edit"),
+    ("download", "Tải Video"),
+    ("library",  "Thư Viện"),
+    ("edit",     "Chỉnh Sửa"),
+    ("batch",    "Batch Edit"),
 ]
 
 # ── Color palette  (R, G, B, A  —  0‑255) ─────────────────────────────────────
@@ -287,23 +287,37 @@ class App:
 
     # ── Load logo texture ──────────────────────────────────────────────────────
     def _load_logo_texture(self):
-        """Load logo.ico and create a DPG texture for it."""
+        """Load logo image and create a DPG static texture."""
         self._logo_texture = None
-        logo_path = os.path.join(os.path.dirname(__file__), "logo.ico")
-        if not os.path.exists(logo_path):
+        base = os.path.dirname(__file__)
+        candidates = ["logo.png", "logo.jpg", "logo.jpeg", "logo.bmp", "logo.ico"]
+        logo_path = None
+        for fn in candidates:
+            p = os.path.join(base, fn)
+            if os.path.exists(p):
+                logo_path = p
+                break
+        if not logo_path:
             return
         try:
             img = Image.open(logo_path).convert("RGBA")
-            img_resized = img.resize((50, 50), Image.Resampling.LANCZOS)
-            img_array = (np.array(img_resized) / 255.0).astype(np.float32)
-            width, height = img_resized.size
+            img = img.resize((50, 50), Image.Resampling.LANCZOS)
+            # Flatten to float list [R,G,B,A, R,G,B,A, ...] in 0.0-1.0 range
+            data = (np.array(img).astype(np.float32) / 255.0).flatten().tolist()
+            w, h = img.size
             with dpg.texture_registry():
-                self._logo_texture = dpg.add_raw_texture(
-                    width, height, img_array,
-                    format=dpg.mvFormat_Float_rgba, tag="logo_texture"
-                )
-        except Exception:
-            pass  # Silent fallback to default if logo load fails
+                dpg.add_static_texture(w, h, data, tag="logo_texture")
+            self._logo_texture = "logo_texture"
+            try:
+                self._log(f"Loaded logo: {os.path.basename(logo_path)}", "info")
+            except Exception:
+                pass
+        except Exception as e:
+            self._logo_texture = None
+            try:
+                self._log(f"Logo load failed: {e}", "err")
+            except Exception:
+                pass
 
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -331,17 +345,10 @@ class App:
             # ── Logo area ────────────────────────────────────────────────────
             dpg.add_spacer(height=18)
             if self._logo_texture:
-                # Use image button if logo loaded successfully (left-aligned)
-                logo = dpg.add_image_button(
-                    "logo_texture", width=60, height=60,
-                    enabled=False,
-                    indent=8)
-                dpg.bind_item_theme(logo, "th_logo")
+                dpg.add_image("logo_texture", width=50, height=50, indent=14)
             else:
-                # Fallback to text button if logo fails to load (left-aligned)
-                logo = dpg.add_button(label="D", width=80, height=80,
-                                      enabled=False,
-                                      indent=8)
+                logo = dpg.add_button(label="TT", width=60, height=60,
+                                      enabled=False, indent=14)
                 dpg.bind_item_theme(logo, "th_logo")
                 if dpg.does_item_exist("f_title"):
                     dpg.bind_item_font(logo, "f_title")
@@ -553,29 +560,6 @@ class App:
                                     default_value="best",
                                     width=160)
 
-                        dpg.add_spacer(height=8)
-                        with dpg.child_window(height=90, border=True, indent=16):
-                            with dpg.group(horizontal=True):
-                                dpg.add_checkbox(
-                                    tag="yt_use_cookies", default_value=False,
-                                    label="")
-                                dpg.add_text("SỬ DỤNG COOKIES", color=_CF2)
-                                dpg.add_spacer(width=16)
-                                from youtube_download import _validate_cookies_file as _vcf
-                                _cf = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
-                                cookies_valid = _vcf(_cf)
-                                _co = _CL_OK if cookies_valid else (200, 80, 80, 255)
-                                _ct = "✓ youtube_cookies.txt sẵn sàng" if cookies_valid \
-                                    else "✗ Chưa có youtube_cookies.txt"
-                                dpg.add_text(_ct, tag="yt_cookie_status",
-                                             color=_co)
-                            dpg.add_text(
-                                "  Đặt file youtube_cookies.txt vào thư mục gốc ứng dụng. "
-                                "Video công khai KHÔNG cần bật cookies.",
-                                color=_CF3, indent=16)
-                            dpg.add_text(
-                                "  ⚠ Bật cookies yêu cầu deno JS runtime (xem yt-dlp wiki/EJS).",
-                                color=(239, 190, 60, 255), indent=16)
                         dpg.add_spacer(height=8)
 
                 dpg.add_spacer(height=14)
@@ -1601,13 +1585,6 @@ class App:
                             self._log(f"Không thể tạo thư mục: {e}", "err")
                     elif cmd == "lib_upload":
                         self._lib_process_upload(payload)
-                    elif cmd == "_yt_cookie_ok":
-                        # Update cookie status indicator in the UI
-                        try:
-                            dpg.set_value("yt_cookie_status", "✓ Đã có youtube_cookies.txt")
-                            dpg.configure_item("yt_cookie_status", color=_CL_OK)
-                        except Exception:
-                            pass
                     continue
 
                 mode, target, res = item
@@ -1912,7 +1889,10 @@ class App:
         else:  # youtube
             yt_mode = dpg.get_value("yt_mode")
             quality = dpg.get_value("yt_quality") or "best"
-            use_cookies = dpg.get_value("yt_use_cookies")
+            # Auto-detect cookies: use them if the cookies file exists and is valid
+            from youtube_download import _validate_cookies_file
+            _cf = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
+            use_cookies = _validate_cookies_file(_cf)
             yt_ctx = get_youtube_runtime_context(quality, use_cookies)
             self._log(
                 f"[Activity #{act}] Bắt đầu tác vụ tải YouTube | mode={yt_mode}",

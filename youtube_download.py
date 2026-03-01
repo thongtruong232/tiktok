@@ -48,14 +48,15 @@ QUALITY_OPTIONS: list[str] = [
 ]
 
 _QUALITY_FORMATS: dict[str, str] = {
-    "best":  "bestvideo*+bestaudio*/best*",
-    "2160p": "bestvideo*[height<=2160]+bestaudio*/best*[height<=2160]",
-    "1440p": "bestvideo*[height<=1440]+bestaudio*/best*[height<=1440]",
-    "1080p": "bestvideo*[height<=1080]+bestaudio*/best*[height<=1080]",
-    "720p":  "bestvideo*[height<=720]+bestaudio*/best*[height<=720]",
-    "480p":  "bestvideo*[height<=480]+bestaudio*/best*[height<=480]",
-    "360p":  "bestvideo*[height<=360]+bestaudio*/best*[height<=360]",
-    "audio": "bestaudio[ext=m4a]/bestaudio*/best*",
+    # Always require audio track — fallback chain: DASH split → combined with audio → any
+    "best":  "bestvideo+bestaudio/best[acodec!=none]/best",
+    "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160][acodec!=none]/best[height<=2160]",
+    "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440][acodec!=none]/best[height<=1440]",
+    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080][acodec!=none]/best[height<=1080]",
+    "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720][acodec!=none]/best[height<=720]",
+    "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480][acodec!=none]/best[height<=480]",
+    "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360][acodec!=none]/best[height<=360]",
+    "audio": "bestaudio[ext=m4a]/bestaudio/best[acodec!=none]",
 }
 
 # Max concurrent video downloads for multi-URL / playlist modes
@@ -193,9 +194,13 @@ def _build_ydl_opts(
         "outtmpl":             os.path.join(out_dir, "%(title)s.%(ext)s"),
         "quiet":               True,
         "no_warnings":         True,
-        "ignoreerrors":        True,
+        # ignoreerrors intentionally omitted for single-video — errors must surface
+        # For playlist/multi, callers set it explicitly via opts update
         "merge_output_format": None if is_audio else "mp4",
         "postprocessors":      [],
+
+        # ── Ensure ffmpeg is used for merging separate video+audio streams ─
+        "prefer_ffmpeg":        True,
 
         # ── SSL / network robustness ───────────────────────────────────────
         "nocheckcertificate":  True,
@@ -203,17 +208,16 @@ def _build_ydl_opts(
         "fragment_retries":    10,
         "http_chunk_size":     10 * 1024 * 1024,   # 10 MB
         "socket_timeout":      30,
-        "continuedl":          True,   # resume interrupted downloads
 
         # ── Concurrent fragment downloads (yt-dlp -N) ─────────────────────
         "concurrent_fragment_downloads": 8,
 
-        # ── Optimized format sorting for maximum quality ───────────────────
-        # Resolution → HDR (12-bit) → FPS → Codec quality → Bitrate → Size
+        # ── Format sorting: resolution first, then prefer streams with audio
         "format_sort": [
             "res",
             "hdr:12",
             "fps",
+            "hasaud",          # prefer formats that already have audio
             "vcodec:vp9.2",
             "vcodec:av01",
             "vcodec:vp9",
@@ -339,6 +343,7 @@ def download_youtube_playlist(
     opts = _build_ydl_opts(out_dir, quality, progress_hook, use_cookies)
     if max_videos:
         opts["playlistend"] = max_videos
+    opts["ignoreerrors"] = True   # skip unavailable videos in playlist
 
     ok = err = 0
 
@@ -485,6 +490,7 @@ def download_youtube_channel(
     opts = _build_ydl_opts(final_out, quality, progress_hook, use_cookies)
     if max_videos:
         opts["playlistend"] = max_videos
+    opts["ignoreerrors"] = True   # skip unavailable videos in channel
 
     ok = err = 0
 
