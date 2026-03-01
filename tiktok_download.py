@@ -1,7 +1,33 @@
 import yt_dlp
 import os
 import re
+import io
+import sys
+from contextlib import contextmanager
 import requests
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+_TT_URL_RE = re.compile(
+    r'https?://(www\.|vm\.|vt\.)?tiktok\.com/', re.IGNORECASE
+)
+
+
+def is_tiktok_url(url: str) -> bool:
+    """Return True if *url* looks like a valid TikTok link."""
+    return bool(_TT_URL_RE.match(url.strip()))
+
+
+@contextmanager
+def _suppress_stderr():
+    """Temporarily redirect stderr to devnull (suppress yt-dlp ERROR lines)."""
+    old = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stderr = old
 
 
 # ── Shared yt-dlp options for TikTok (applied to all functions) ───────────────
@@ -109,20 +135,13 @@ def _resolve_channel_id(profile_url: str) -> str | None:
         for vid_id in unique_vids[:10]:
             video_url = f'https://www.tiktok.com/@_/video/{vid_id}'
             try:
-                # Redirect stderr to suppress any ERROR lines yt-dlp
-                # prints directly (bypassing the logger in some cases)
-                import io, sys
-                old_stderr = sys.stderr
-                sys.stderr = io.StringIO()
-                try:
+                with _suppress_stderr():
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(video_url, download=False)
                         if info:
                             cid = info.get('channel_id') or info.get('uploader_id')
                             if cid:
                                 return cid
-                finally:
-                    sys.stderr = old_stderr
             except Exception:
                 continue
     except Exception:
@@ -188,13 +207,8 @@ def download_from_profile(profile_url, output_path='downloads', max_videos=None,
 
     # ── 1. Normal attempt (suppress stderr to avoid ERROR leaking) ───────
     try:
-        import io, sys
-        old_stderr = sys.stderr
-        sys.stderr = io.StringIO()
-        try:
+        with _suppress_stderr():
             return _do_download(profile_url, suppress_stderr=True)
-        finally:
-            sys.stderr = old_stderr
     except Exception as e:
         err_msg = str(e)
         if 'Unable to extract secondary user ID' not in err_msg:

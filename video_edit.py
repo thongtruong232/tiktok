@@ -1,16 +1,41 @@
 import os
+import shutil
 import subprocess
 import sys
 import ffmpeg
 
 
+# ── FFmpeg availability check ─────────────────────────────────────────────────
+_ffmpeg_ok: bool | None = None
+
+
+def check_ffmpeg() -> bool:
+    """Return True if ffmpeg is available on PATH (cached)."""
+    global _ffmpeg_ok
+    if _ffmpeg_ok is None:
+        _ffmpeg_ok = shutil.which('ffmpeg') is not None
+    return _ffmpeg_ok
+
+
 def _run(stream) -> None:
     """Run an ffmpeg stream graph, suppressing the console window on Windows."""
+    if not check_ffmpeg():
+        raise RuntimeError(
+            'FFmpeg không được tìm thấy. Cài đặt FFmpeg và thêm vào PATH.'
+        )
     cmd = ffmpeg.compile(stream, overwrite_output=True)
-    kwargs: dict = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
+    kwargs: dict = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.PIPE}
     if sys.platform == 'win32':
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-    subprocess.run(cmd, check=True, **kwargs)
+    proc = subprocess.run(cmd, check=False, **kwargs)
+    if proc.returncode != 0:
+        stderr_text = (proc.stderr or b'').decode(errors='replace').strip()
+        # Keep only the last 3 lines for a concise error
+        lines = stderr_text.splitlines()[-3:]
+        raise RuntimeError(
+            f'FFmpeg lỗi (code {proc.returncode}): {chr(10).join(lines)}'
+        )
+
 
 # ── Internal helper ───────────────────────────────────────────────────────────
 
@@ -38,6 +63,57 @@ def resize_video(input_path: str, width: int, height: int,
         ffmpeg
         .input(input_path)
         .filter('scale', width, height)
+        .output(output_path)
+        .overwrite_output()
+    )
+    return output_path
+
+
+# ── 2. Trim (cắt video) ───────────────────────────────────────────────────────
+
+def trim_video(input_path: str, start: str, end: str,
+               output_path: str | None = None) -> str:
+    """Trim video from start to end time.
+
+    Args:
+        input_path: Path to input video.
+        start: Start time (HH:MM:SS or SS format).
+        end:   End time   (HH:MM:SS or SS format).
+        output_path: Optional output path.
+
+    Returns: output file path.
+    """
+    output_path = output_path or _derive(input_path, 'trimmed')
+    _run(
+        ffmpeg
+        .input(input_path, ss=start, to=end)
+        .output(output_path, c='copy')
+        .overwrite_output()
+    )
+    return output_path
+
+
+# ── 3. Crop (cắt khung hình) ─────────────────────────────────────────────────
+
+def crop_video(input_path: str, width: int, height: int,
+               x: int = 0, y: int = 0,
+               output_path: str | None = None) -> str:
+    """Crop video to a specific region.
+
+    Args:
+        input_path: Path to input video.
+        width, height: Dimensions of the crop area.
+        x, y: Top-left corner of the crop area.
+        output_path: Optional output path.
+
+    Returns: output file path.
+    """
+    output_path = output_path or _derive(input_path,
+                                         f'crop{width}x{height}')
+    _run(
+        ffmpeg
+        .input(input_path)
+        .filter('crop', width, height, x, y)
         .output(output_path)
         .overwrite_output()
     )
@@ -188,6 +264,27 @@ LOGO_POSITIONS = {
     'Center':       ('(W-w)/2',   '(H-h)/2'),
     'Custom':       (None,        None),
 }
+
+
+# ── 10. Get video info (probe) ────────────────────────────────────────────────
+
+def probe_video(input_path: str) -> dict | None:
+    """Return video metadata via ffprobe (duration, resolution, codec, etc.)."""
+    try:
+        return ffmpeg.probe(input_path)
+    except Exception:
+        return None
+
+
+def get_duration(input_path: str) -> float:
+    """Return video duration in seconds, or 0.0 on failure."""
+    info = probe_video(input_path)
+    if info and 'format' in info:
+        try:
+            return float(info['format'].get('duration', 0))
+        except (ValueError, TypeError):
+            pass
+    return 0.0
 
 
 def add_logo(input_path: str, logo_path: str,

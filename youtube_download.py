@@ -31,6 +31,17 @@ from typing import Callable
 import yt_dlp
 
 
+# ── URL validation ──────────────────────────────────────────────────────────────
+_YT_URL_RE = re.compile(
+    r'https?://(www\.|m\.|music\.)?youtu(\.be|be\.com)/', re.IGNORECASE
+)
+
+
+def is_youtube_url(url: str) -> bool:
+    """Return True if *url* looks like a valid YouTube link."""
+    return bool(_YT_URL_RE.match(url.strip()))
+
+
 # ── Quality presets ────────────────────────────────────────────────────────────
 QUALITY_OPTIONS: list[str] = [
     "best", "2160p", "1440p", "1080p", "720p", "480p", "360p", "audio",
@@ -272,10 +283,15 @@ def download_youtube_video(
         out_dir:       Output directory.
         quality:       One of QUALITY_OPTIONS (default "best").
         progress_hook: Optional yt-dlp progress callback.
+        log_fn:        Optional logging callback (text, tag).
         use_cookies:   Whether to inject cookies.txt (default False).
 
     Returns: output filepath on success, None on failure.
     """
+    if not is_youtube_url(url):
+        if log_fn:
+            log_fn(f"URL không hợp lệ: {url}", "err")
+        return None
     os.makedirs(out_dir, exist_ok=True)
     if log_fn:
         ctx = get_youtube_runtime_context(quality, use_cookies)

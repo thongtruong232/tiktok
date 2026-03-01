@@ -3,29 +3,32 @@ import json
 import queue
 import time
 import threading
-import tkinter as _tk               # used ONLY for file dialogs
 from datetime import datetime
-from tkinter import filedialog as _fdlg
 
 import numpy as np
 from PIL import Image
 import dearpygui.dearpygui as dpg
 
-from tiktok_download import download_tiktok_video, download_from_profile
+from tiktok_download import download_tiktok_video, download_from_profile, is_tiktok_url
 from youtube_download import (download_youtube_video, download_youtube_playlist,
                                download_youtube_multi, download_youtube_channel,
-                               QUALITY_OPTIONS, get_youtube_runtime_context)
+                               QUALITY_OPTIONS, get_youtube_runtime_context,
+                               is_youtube_url)
 import video_edit
 
-# ── Hidden Tk root (file dialogs only) ────────────────────────────────────────
-_tk_root = _tk.Tk()
-_tk_root.withdraw()
-
 # ── Layout constants ───────────────────────────────────────────────────────────
-_SIDEBAR_W = 110
-_LOG_W     = 300
+_SIDEBAR_W = 145
+_LOG_W     = 310
 _HDR_H     = 68
 _MAX_LOG   = 300   # max log lines kept in panel
+
+# ── Navigation items (page_id, label with icon) ───────────────────────────────
+_NAV_ITEMS = [
+    ("download", "▼  Tải Video"),
+    ("library",  "■  Thư Viện"),
+    ("edit",     "▶  Chỉnh Sửa"),
+    ("batch",    "≡  Batch Edit"),
+]
 
 # ── Color palette  (R, G, B, A  —  0‑255) ─────────────────────────────────────
 _CA      = (238,  29,  82, 255)   # accent (TikTok pink-red)
@@ -102,7 +105,15 @@ class App:
         self._setup_fonts()
         self._setup_themes()
         self._load_logo_texture()
-        
+
+        # ── Check FFmpeg availability ─────────────────────────────────────
+        if not video_edit.check_ffmpeg():
+            self._log_queue.put((
+                "[Cảnh báo] FFmpeg không tìm thấy trên PATH. "
+                "Chức năng chỉnh sửa video sẽ không hoạt động.",
+                (239, 190, 60, 255),
+            ))
+
         # Load saved window config, or use primary monitor fullscreen
         win_config = self._load_window_config()
         if win_config and "width" in win_config and "height" in win_config:
@@ -343,12 +354,7 @@ class App:
             # dpg.add_spacer(height=16)
 
             # ── Navigation buttons ───────────────────────────────────────────
-            for page_id, label in [
-                ("download", "Tải Video"),
-                ("library",  "Thư Viện"),
-                ("edit",     "Chỉnh Sửa"),
-                ("batch",    "Batch Edit"),
-            ]:
+            for page_id, label in _NAV_ITEMS:
                 btn = dpg.add_button(
                     label=label, tag=f"nav_{page_id}",
                     width=_SIDEBAR_W - 16, height=38,
@@ -643,19 +649,8 @@ class App:
             self._current_edit_tab = label
 
     def _paste_single(self):
-        """Paste clipboard text into the URL field using subprocess (no Tk needed)."""
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['powershell', '-command', 'Get-Clipboard'],
-                capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            text = result.stdout.strip()
-            if text:
-                dpg.set_value("url_single", text)
-        except Exception:
-            pass
+        """Paste clipboard text into the URL field."""
+        self._paste_to("url_single")
 
     def _paste_to(self, tag: str):
         """Paste clipboard text into the field identified by `tag`."""
@@ -960,8 +955,7 @@ class App:
                 dpg.add_text(self._format_size(finfo["size"]), color=_CF2)
 
                 # Date
-                from datetime import datetime as _dt
-                ts = _dt.fromtimestamp(finfo["mtime"]).strftime("%H:%M:%S %d/%m/%Y")
+                ts = datetime.fromtimestamp(finfo["mtime"]).strftime("%H:%M:%S %d/%m/%Y")
                 dpg.add_text(ts, color=_CF2)
 
     def _lib_toggle_select(self, idx: int, checked: bool):
@@ -1003,6 +997,8 @@ class App:
         if not self._lib_selected:
             self._log("Chưa chọn file nào để xóa.", "err")
             return
+        count = len(self._lib_selected)
+        self._log(f"Đang xóa {count} file...", "info")
         deleted = 0
         for idx in sorted(self._lib_selected, reverse=True):
             if 0 <= idx < len(self._lib_files):
@@ -1088,6 +1084,10 @@ class App:
                                  callback=self._on_tab_change):
                     with dpg.tab(label="Resize",  tag="tab_resize"):
                         self._tab_resize()
+                    with dpg.tab(label="Trim",    tag="tab_trim"):
+                        self._tab_trim()
+                    with dpg.tab(label="Crop",    tag="tab_crop"):
+                        self._tab_crop()
                     with dpg.tab(label="Audio",   tag="tab_audio"):
                         self._tab_audio()
                     with dpg.tab(label="Convert", tag="tab_convert"):
@@ -1146,6 +1146,90 @@ class App:
         dpg.add_spacer(height=6)
         dpg.add_text("Dùng -1 cho một chiều để giữ tỉ lệ khung hình.",
                      color=_CF3, indent=20)
+
+    def _tab_trim(self):
+        dpg.add_spacer(height=10)
+        dpg.add_text("Cắt video theo thời gian (stream-copy, không re-encode):",
+                     color=_CF2, indent=20)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Bắt đầu:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="trim_start", default_value="00:00:00",
+                               width=120, hint="HH:MM:SS")
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Kết thúc:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="trim_end", default_value="00:01:00",
+                               width=120, hint="HH:MM:SS")
+        dpg.add_spacer(height=6)
+        dpg.add_text("Định dạng: HH:MM:SS hoặc số giây (vd: 90 = 1:30).",
+                     color=_CF3, indent=20)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_button(label="Lấy thời lượng", width=130,
+                           callback=self._get_video_duration)
+            dpg.add_spacer(width=8)
+            dpg.add_text("", tag="trim_duration_txt", color=_CF2)
+
+    def _tab_crop(self):
+        dpg.add_spacer(height=10)
+        dpg.add_text("Cắt khung hình (crop):", color=_CF2, indent=20)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("Width:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="crop_w", default_value="1280", width=100)
+            dpg.add_spacer(width=16)
+            dpg.add_text("Height:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="crop_h", default_value="720", width=100)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True, indent=20):
+            dpg.add_text("X:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="crop_x", default_value="0", width=100)
+            dpg.add_spacer(width=16)
+            dpg.add_text("Y:", color=_CF2)
+            dpg.add_spacer(width=4)
+            dpg.add_input_text(tag="crop_y", default_value="0", width=100)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Nhanh chọn:", color=_CF2, indent=20)
+        dpg.add_spacer(height=4)
+        with dpg.group(horizontal=True, indent=20):
+            for lbl, vals in [("16:9", ("1280", "720")),
+                               ("9:16", ("720", "1280")),
+                               ("1:1", ("720", "720")),
+                               ("4:3", ("960", "720"))]:
+                dpg.add_button(label=lbl, width=56,
+                               callback=lambda s, a, u: self._set_crop_preset(u),
+                               user_data=vals)
+                dpg.add_spacer(width=4)
+        dpg.add_spacer(height=6)
+        dpg.add_text("X, Y = tọa độ góc trên-trái vùng cắt. Dùng 0,0 để cắt từ góc.",
+                     color=_CF3, indent=20)
+
+    def _set_crop_preset(self, vals):
+        dpg.set_value("crop_w", vals[0])
+        dpg.set_value("crop_h", vals[1])
+
+    def _get_video_duration(self):
+        """Show the duration of the selected input video."""
+        inp = dpg.get_value("edit_in").strip()
+        if not inp or not os.path.isfile(inp):
+            self._log("Chọn file video trước để lấy thời lượng.", "err")
+            return
+        dur = video_edit.get_duration(inp)
+        if dur > 0:
+            mins, secs = divmod(int(dur), 60)
+            hrs, mins = divmod(mins, 60)
+            txt = f"{hrs:02d}:{mins:02d}:{secs:02d} ({dur:.1f}s)"
+            dpg.set_value("trim_duration_txt", txt)
+            dpg.set_value("trim_end", f"{hrs:02d}:{mins:02d}:{secs:02d}")
+            self._log(f"Thời lượng: {txt}", "info")
+        else:
+            dpg.set_value("trim_duration_txt", "Không đọc được")
+            self._log("Không đọc được thời lượng video.", "err")
 
     def _tab_audio(self):
         dpg.add_spacer(height=10)
@@ -1317,8 +1401,8 @@ class App:
                 dpg.add_spacer(height=10)
 
                 # Operation selector
-                _BOPS = ["Resize", "Extract Audio", "Remove Audio",
-                         "Convert", "Speed", "Rotate", "Logo"]
+                _BOPS = ["Resize", "Trim", "Crop", "Extract Audio",
+                         "Remove Audio", "Convert", "Speed", "Rotate", "Logo"]
                 with dpg.child_window(height=200, border=True, indent=16):
                     dpg.add_text("THAO TÁC ÁP DỤNG CHO TẤT CẢ FILE", color=_CF2, indent=16)
                     dpg.add_spacer(height=8)
@@ -1349,6 +1433,37 @@ class App:
                             dpg.add_text("H:", color=_CF2)
                             dpg.add_input_text(tag="b_res_h",
                                                default_value="720",  width=100)
+
+                    with dpg.group(tag="bop_trim"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("Bắt đầu:", color=_CF2, indent=16)
+                            dpg.add_input_text(tag="b_trim_start",
+                                               default_value="00:00:00", width=120)
+                            dpg.add_spacer(width=12)
+                            dpg.add_text("Kết thúc:", color=_CF2)
+                            dpg.add_input_text(tag="b_trim_end",
+                                               default_value="00:01:00", width=120)
+                    dpg.hide_item("bop_trim")
+
+                    with dpg.group(tag="bop_crop"):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("W:", color=_CF2, indent=16)
+                            dpg.add_input_text(tag="b_crop_w",
+                                               default_value="1280", width=100)
+                            dpg.add_spacer(width=12)
+                            dpg.add_text("H:", color=_CF2)
+                            dpg.add_input_text(tag="b_crop_h",
+                                               default_value="720", width=100)
+                        dpg.add_spacer(height=4)
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("X:", color=_CF2, indent=16)
+                            dpg.add_input_text(tag="b_crop_x",
+                                               default_value="0", width=100)
+                            dpg.add_spacer(width=12)
+                            dpg.add_text("Y:", color=_CF2)
+                            dpg.add_input_text(tag="b_crop_y",
+                                               default_value="0", width=100)
+                    dpg.hide_item("bop_crop")
 
                     with dpg.group(tag="bop_extract_audio"):
                         with dpg.group(horizontal=True):
@@ -1547,7 +1662,7 @@ class App:
         icon_map = {"ok": "✓", "err": "✗", "info": "•"}
         self._log_queue.put((f"[{ts}] {icon_map.get(tag, '•')} {text}", colors.get(tag, _CF)))
         try:
-            dpg.set_value("status_txt", text[:55])
+            dpg.set_value("status_txt", text[:80])
         except Exception:
             pass
 
@@ -1682,6 +1797,8 @@ class App:
     def _on_batch_op_change(self, sender, app_data):
         op_to_group = {
             "Resize":        "bop_resize",
+            "Trim":          "bop_trim",
+            "Crop":          "bop_crop",
             "Extract Audio": "bop_extract_audio",
             "Remove Audio":  "bop_remove_audio",
             "Convert":       "bop_convert",
@@ -1766,11 +1883,15 @@ class App:
                 url = dpg.get_value("url_single").strip()
                 if not url:
                     self._log("Vui lòng nhập URL video.", "err"); return
+                if not is_tiktok_url(url):
+                    self._log("URL không phải TikTok hợp lệ. Hãy kiểm tra lại.", "err"); return
                 targets = [("tt_single", url)]
             elif mode == "Profile":
                 url = dpg.get_value("url_profile").strip()
                 if not url:
                     self._log("Vui lòng nhập URL profile.", "err"); return
+                if not is_tiktok_url(url):
+                    self._log("URL không phải TikTok hợp lệ.", "err"); return
                 mv    = dpg.get_value("max_videos").strip()
                 max_v = int(mv) if mv.isdigit() else None
                 targets = [("tt_profile", (url, max_v))]
@@ -1779,6 +1900,13 @@ class App:
                 urls = [ln.strip() for ln in raw.splitlines() if ln.strip()]
                 if not urls:
                     self._log("Vui lòng nhập ít nhất một URL.", "err"); return
+                # Filter and warn about invalid URLs
+                invalid = [u for u in urls if not is_tiktok_url(u)]
+                if invalid:
+                    self._log(f"Bỏ qua {len(invalid)} URL không hợp lệ.", "err")
+                    urls = [u for u in urls if is_tiktok_url(u)]
+                    if not urls:
+                        self._log("Không có URL TikTok hợp lệ nào.", "err"); return
                 targets = [("tt_multi", urls)]
 
         else:  # youtube
@@ -1799,6 +1927,8 @@ class App:
                 url = dpg.get_value("yt_url_single").strip()
                 if not url:
                     self._log("Vui lòng nhập URL video YouTube.", "err"); return
+                if not is_youtube_url(url):
+                    self._log("URL không phải YouTube hợp lệ.", "err"); return
                 targets = [("yt_single", (url, quality, use_cookies))]
             elif yt_mode == "Playlist":
                 url = dpg.get_value("yt_playlist_url").strip()
@@ -1932,6 +2062,8 @@ class App:
             elapsed = time.perf_counter() - started
             self._log(f"[Activity #{act}] Kết thúc tác vụ tải ({elapsed:.1f}s)", "ok")
             try:
+                dpg.set_value("dl_prog", 1.0)
+                time.sleep(1.5)  # show 100% briefly
                 dpg.configure_item("dl_btn", enabled=True)
                 dpg.set_value("dl_prog", 0.0)
             except Exception:
@@ -1951,11 +2083,27 @@ class App:
                          args=(tab, inp, out), daemon=True).start()
 
     def _edit_worker(self, tab: str, inp: str, out):
+        started = time.perf_counter()
         try:
+            dpg.set_value("edit_prog", 0.15)
             if "Resize" in tab:
                 w, h = int(dpg.get_value("res_w")), int(dpg.get_value("res_h"))
                 self._log(f"Resize {w}x{h}: {os.path.basename(inp)}", "info")
                 result = video_edit.resize_video(inp, w, h, out)
+            elif "Trim" in tab:
+                start = dpg.get_value("trim_start").strip()
+                end = dpg.get_value("trim_end").strip()
+                if not start or not end:
+                    self._log("Nhập thời gian bắt đầu và kết thúc.", "err"); return
+                self._log(f"Trim {start}→{end}: {os.path.basename(inp)}", "info")
+                result = video_edit.trim_video(inp, start, end, out)
+            elif "Crop" in tab:
+                cw = int(dpg.get_value("crop_w"))
+                ch = int(dpg.get_value("crop_h"))
+                cx = int(dpg.get_value("crop_x"))
+                cy = int(dpg.get_value("crop_y"))
+                self._log(f"Crop {cw}x{ch}+{cx}+{cy}: {os.path.basename(inp)}", "info")
+                result = video_edit.crop_video(inp, cw, ch, cx, cy, out)
             elif "Audio" in tab:
                 mode = dpg.get_value("audio_mode")
                 if "Extract" in mode:
@@ -2010,11 +2158,14 @@ class App:
                 self._log(f"Logo ({pos}): {os.path.basename(inp)}", "info")
                 result = video_edit.add_logo(inp, logo, pos, cx, cy,
                                              scale, opacity, out)
-            self._log(f"Hoàn thành: {result}", "ok")
+            dpg.set_value("edit_prog", 1.0)
+            elapsed = time.perf_counter() - started
+            self._log(f"Hoàn thành ({elapsed:.1f}s): {result}", "ok")
         except Exception as e:
             self._log(f"Lỗi edit: {e}", "err")
         finally:
             try:
+                time.sleep(1.0)  # show completion briefly
                 dpg.configure_item("edit_btn", enabled=True)
                 dpg.set_value("edit_prog", 0.0)
             except Exception:
@@ -2059,6 +2210,18 @@ class App:
                                 int(dpg.get_value("b_res_h")))
                         result = video_edit.resize_video(
                             inp, w, h, _out(f"{w}x{h}"))
+                    elif op == "Trim":
+                        start = dpg.get_value("b_trim_start").strip()
+                        end = dpg.get_value("b_trim_end").strip()
+                        result = video_edit.trim_video(
+                            inp, start, end, _out("trimmed"))
+                    elif op == "Crop":
+                        cw = int(dpg.get_value("b_crop_w"))
+                        ch = int(dpg.get_value("b_crop_h"))
+                        cx = int(dpg.get_value("b_crop_x"))
+                        cy = int(dpg.get_value("b_crop_y"))
+                        result = video_edit.crop_video(
+                            inp, cw, ch, cx, cy, _out(f"crop{cw}x{ch}"))
                     elif op == "Extract Audio":
                         fmt    = dpg.get_value("b_audio_fmt")
                         result = video_edit.extract_audio(
