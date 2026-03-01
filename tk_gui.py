@@ -54,14 +54,16 @@ _CNAV_H  = ( 30,  30,  30, 255)   # nav button hover (inactive)
 
 
 class App:
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         self._current_page: str | None     = None
         self._pages: dict[str, str]         = {}    # page_id → child_window tag
         self._nav_btns: dict[str, str]      = {}    # page_id → button tag
         self._log_queue: queue.Queue        = queue.Queue()
+        self._dlg_queue: queue.Queue        = queue.Queue()
         self._log_items: list[str]          = []
-        self._live_dl_tag: str | None      = None
-        self._max_log = _MAX_LOG
+        self._log_counter: int              = 0
+        self._activity_id: int              = 0
+        self._logo_texture: str | None      = None   # logo texture tag (if loaded)
         # ── Edit / Batch state ────────────────────────────────────────────
         self._current_edit_tab: str         = "Resize"   # tracks selected tab
         self._current_dl_platform: str      = "tiktok"   # tracks active download platform
@@ -1553,96 +1555,100 @@ class App:
 
     # ── Log queue pump (called every frame from render thread) ─────────────────
     def _process_log_queue(self, *_):
-        """Drain the thread-safe log queue and render entries.
-
-        Queue item formats:
-          - (text, color)                => append new line
-          - (text, color, True)          => live in-place update
-          - ("__reset_live__", None, True) => reset live slot
-        """
-        while True:
+        while not self._log_queue.empty():
             try:
-                item = self._log_queue.get_nowait()
+                text, color = self._log_queue.get_nowait()
+                self._add_log_entry(text, color)
             except queue.Empty:
                 break
-
+        # Process pending dialog results (from worker threads)
+        while not self._dlg_queue.empty():
             try:
-                # normalize formats
-                if isinstance(item, tuple):
-                    if len(item) >= 3 and item[2] is True:
-                        text = item[0]
-                        color = item[1] if len(item) > 1 else _CF2
-                        # reset signal
-                        if text == "__reset_live__":
-                            self._live_dl_tag = None
+                item = self._dlg_queue.get_nowait()
+                if not item:
+                    continue
+
+                # Library-specific 2-tuple messages
+                if len(item) == 2:
+                    cmd, payload = item
+                    if cmd == "lib_root_set":
+                        self._lib_root = os.path.abspath(payload)
+                        dpg.set_value("lib_root_input", self._lib_root)
+                        self._lib_refresh_folders()
+                    elif cmd == "lib_new_folder":
+                        new_path = os.path.join(self._lib_root, payload)
+                        try:
+                            os.makedirs(new_path, exist_ok=True)
+                            self._log(f"Đã tạo thư mục: {payload}", "ok")
+                            self._lib_refresh_folders()
+                        except Exception as e:
+                            self._log(f"Không thể tạo thư mục: {e}", "err")
+                    elif cmd == "lib_upload":
+                        self._lib_process_upload(payload)
+                    continue
+
+                mode, target, res = item
+                if not res:
+                    continue
+                if mode in ('open', 'save', 'dir'):
+                    try:
+                        dpg.set_value(target, res)
+                    except Exception:
+                        pass
+                elif mode == 'open_multi':
+                    try:
+                        new_files = list(res)
+                        if target == '__merge__':
+                            # add to app-side list, sync to listbox
+                            for f in new_files:
+                                if f not in self._merge_items:
+                                    self._merge_items.append(f)
+                            dpg.configure_item("merge_list",
+                                               items=list(self._merge_items))
+                        elif target == '__batch__':
+                            for f in new_files:
+                                if f not in self._batch_items:
+                                    self._batch_items.append(f)
+                            self._refresh_batch_list_display()
                         else:
-                            self._add_log_entry(text, color=color, live=True)
-                    else:
-                        text = item[0]
-                        color = item[1] if len(item) > 1 else _CF2
-                        self._add_log_entry(text, color=color, live=False)
-                else:
-                    # plain string
-                    self._add_log_entry(str(item), color=_CF2, live=False)
-            except Exception as e:
-                # ensure render-thread exceptions don't kill UI loop
-                try:
-                    dpg.add_text(f"[log pump error] {e}", color=(255, 80, 80),
-                                 parent="log_content")
-                except Exception:
-                    pass
+                            # generic listbox fallback
+                            dpg.configure_item(target, items=new_files)
+                    except Exception:
+                        pass
+            except queue.Empty:
+                break
+        if dpg.is_dearpygui_running():
+            dpg.set_frame_callback(dpg.get_frame_count() + 1,
+                                   self._process_log_queue)
 
-    def _add_log_entry(self, text: str, color=None, live: bool = False):
-        """Render a log item on render thread. live=True => update in-place."""
-        if color is None:
-            color = _CF2
-        # live update: overwrite existing live tag if present
-        if live:
-            if self._live_dl_tag and dpg.does_item_exist(self._live_dl_tag):
-                try:
-                    dpg.set_value(self._live_dl_tag, text)
-                    return
-                except Exception:
-                    # fallback to recreate below
-                    self._live_dl_tag = None
-            tag = f"log_live_{int(time.time()*1000)}"
-            dpg.add_text(text, color=color, tag=tag, parent="log_content")
-            self._live_dl_tag = tag
-            self._log_items.append(tag)
-            return
-
-        # normal (append new line)
-        # reset live tag so next live update creates new line
-        self._live_dl_tag = None
-        tag = f"log_{int(time.time()*1000)}"
-        dpg.add_text(text, color=color, tag=tag, parent="log_content")
+    def _add_log_entry(self, text: str, color: tuple):
+        tag = f"ll_{self._log_counter}"
+        self._log_counter += 1
+        dpg.add_text(text, tag=tag, color=color,
+                     parent="log_content", wrap=_LOG_W - 36)
         self._log_items.append(tag)
-
-        # enforce max lines
-        while len(self._log_items) > self._max_log:
+        while len(self._log_items) > _MAX_LOG:
             old = self._log_items.pop(0)
-            try:
-                if dpg.does_item_exist(old):
-                    dpg.delete_item(old)
-            except Exception:
-                pass
+            if dpg.does_item_exist(old):
+                dpg.delete_item(old)
+        dpg.set_y_scroll("log_content", dpg.get_y_scroll_max("log_content"))
 
-        # try to scroll to bottom (safe)
+    def _log(self, text: str, tag: str = "info"):
+        ts     = datetime.now().strftime("%H:%M:%S")
+        colors = {"ok": _CL_OK, "err": _CL_ERR, "info": _CL_INFO}
+        icon_map = {"ok": "✓", "err": "✗", "info": "•"}
+        self._log_queue.put((f"[{ts}] {icon_map.get(tag, '•')} {text}", colors.get(tag, _CF)))
         try:
-            dpg.set_y_scroll("log_content", 1.0)
+            dpg.set_value("status_txt", text[:80])
         except Exception:
             pass
 
-    def _clear_log(self, *_):
-        """Clear all log UI items and reset live slot."""
-        for tag in list(self._log_items):
-            try:
-                if dpg.does_item_exist(tag):
-                    dpg.delete_item(tag)
-            except Exception:
-                pass
+    def _clear_log(self):
+        for tag in self._log_items:
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
         self._log_items.clear()
-        self._live_dl_tag = None
+        dpg.set_value("status_txt", "Ready")
 
     # ── Viewport resize ────────────────────────────────────────────────────────
     def _on_resize(self):
