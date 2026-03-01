@@ -48,15 +48,19 @@ QUALITY_OPTIONS: list[str] = [
 ]
 
 _QUALITY_FORMATS: dict[str, str] = {
-    # Fallback chain: separate streams (DASH, needs ffmpeg merge)
-    #   → combined format at quality → absolute best combined → anything
-    "best":  "bestvideo+bestaudio/best",
-    "2160p": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-    "1440p": "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
-    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-    "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-    "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-    "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+    # iOS/Android player clients return progressive MP4 (no PO-token needed).
+    # Fallback chain per quality level:
+    #   1. bestvideo[ext=mp4]+bestaudio[ext=m4a]  — separate streams, prefer mp4/m4a
+    #   2. bestvideo+bestaudio                    — separate streams, any container
+    #   3. b[ext=mp4][height<=N]                  — combined progressive MP4 (ios 360p/720p)
+    #   4. best[height<=N] / best                 — absolute fallback, any format
+    "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/b[ext=mp4]/best",
+    "2160p": "bestvideo[ext=mp4][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/b[ext=mp4][height<=2160]/best[height<=2160]/best",
+    "1440p": "bestvideo[ext=mp4][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/b[ext=mp4][height<=1440]/best[height<=1440]/best",
+    "1080p": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/b[ext=mp4][height<=1080]/best[height<=1080]/best",
+    "720p":  "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/b[ext=mp4][height<=720]/best[height<=720]/best",
+    "480p":  "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/b[ext=mp4][height<=480]/best[height<=480]/best",
+    "360p":  "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/b[ext=mp4][height<=360]/best[height<=360]/best",
     "audio": "bestaudio[ext=m4a]/bestaudio/best",
 }
 
@@ -240,14 +244,28 @@ def _build_ydl_opts(
             ]
         }
 
-    # ── Inject cookies only when explicitly enabled ─────────────────────────
-    # NOTE: cookies trigger a JS-based signature path in yt-dlp that requires
-    #       deno runtime.  Without deno, only thumbnails are returned.
-    #       Default extraction (no cookies) returns full DASH formats (up to 4K)
-    #       for all public videos without any JS runtime.
-    if use_cookies:
-        cookie_opts = _cookies_opt()
+    # ── Cookies + player client (mutually exclusive strategies) ──────────────
+    # yt-dlp automatically SKIPS ios/android clients when a cookiefile is
+    # present, leaving only mweb — which requires a GVS PO Token and yields
+    # zero formats.  So we must choose one strategy based on cookie availability:
+    #
+    #   cookies available  → web client (default) + cookiefile/cookiesfrombrowser
+    #                         Full DASH access; format "bestvideo+bestaudio" works.
+    #
+    #   no cookies found   → ios + android player clients
+    #                         Progressive MP4 streams, no PO token needed.
+    #                         Max quality ~720p on most videos.
+    cookie_opts: dict = _cookies_opt() if use_cookies else {}
+    if cookie_opts:
+        # Web client path: apply cookie option, do NOT set extractor_args
         opts.update(cookie_opts)
+    else:
+        # No-cookie path: override player client to bypass PO-token requirement
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["ios", "android"],
+            }
+        }
 
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
