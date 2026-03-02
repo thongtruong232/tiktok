@@ -48,20 +48,21 @@ QUALITY_OPTIONS: list[str] = [
 ]
 
 _QUALITY_FORMATS: dict[str, str] = {
-    # iOS/Android player clients return progressive MP4 (no PO-token needed).
-    # Fallback chain per quality level:
-    #   1. bestvideo[ext=mp4]+bestaudio[ext=m4a]  — separate streams, prefer mp4/m4a
-    #   2. bestvideo+bestaudio                    — separate streams, any container
-    #   3. b[ext=mp4][height<=N]                  — combined progressive MP4 (ios 360p/720p)
-    #   4. best[height<=N] / best                 — absolute fallback, any format
-    "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/b[ext=mp4]/best",
-    "2160p": "bestvideo[ext=mp4][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/b[ext=mp4][height<=2160]/best[height<=2160]/best",
-    "1440p": "bestvideo[ext=mp4][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/b[ext=mp4][height<=1440]/best[height<=1440]/best",
-    "1080p": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/b[ext=mp4][height<=1080]/best[height<=1080]/best",
-    "720p":  "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/b[ext=mp4][height<=720]/best[height<=720]/best",
-    "480p":  "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/b[ext=mp4][height<=480]/best[height<=480]/best",
-    "360p":  "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/b[ext=mp4][height<=360]/best[height<=360]/best",
-    "audio": "bestaudio[ext=m4a]/bestaudio/best",
+    # tv_embedded client provides full DASH streams without PO-token requirement.
+    # Fallback chain per quality level (5 levels):
+    #   1. bestvideo[ext=mp4]+bestaudio[ext=m4a]  — DASH streams, prefer mp4/m4a
+    #   2. bestvideo+bestaudio                    — DASH streams, any container
+    #   3. bestvideo[ext=mp4]+bestaudio           — mixed container fallback
+    #   4. b[ext=mp4][height<=N]                  — combined progressive MP4
+    #   5. best[height<=N] / best                 — absolute fallback, any format
+    "best":  "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/bestvideo[ext=mp4]+bestaudio/b[ext=mp4]/best",
+    "2160p": "bestvideo[ext=mp4][height<=2160]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/bestvideo[ext=mp4][height<=2160]+bestaudio/b[ext=mp4][height<=2160]/best[height<=2160]/best",
+    "1440p": "bestvideo[ext=mp4][height<=1440]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/bestvideo[ext=mp4][height<=1440]+bestaudio/b[ext=mp4][height<=1440]/best[height<=1440]/best",
+    "1080p": "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[ext=mp4][height<=1080]+bestaudio/b[ext=mp4][height<=1080]/best[height<=1080]/best",
+    "720p":  "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/bestvideo[ext=mp4][height<=720]+bestaudio/b[ext=mp4][height<=720]/best[height<=720]/best",
+    "480p":  "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/bestvideo[ext=mp4][height<=480]+bestaudio/b[ext=mp4][height<=480]/best[height<=480]/best",
+    "360p":  "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/bestvideo[ext=mp4][height<=360]+bestaudio/b[ext=mp4][height<=360]/best[height<=360]/best",
+    "audio": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
 }
 
 # Max concurrent video downloads for multi-URL / playlist modes
@@ -87,14 +88,10 @@ def _cookie_status_text() -> str:
     return "không sử dụng"
 
 
-def get_youtube_runtime_context(quality: str = "best", use_cookies: bool = False) -> dict:
+def get_youtube_runtime_context(quality: str = "best", use_cookies: bool = True) -> dict:
     """Return current runtime context used for YouTube downloads."""
-    if use_cookies:
-        cookie_status = _cookie_status_text()
-        cookies_opt = _cookies_opt()
-    else:
-        cookie_status = "tắt"
-        cookies_opt = {}
+    cookie_status = _cookie_status_text()
+    cookies_opt = _cookies_opt()
     return {
         "quality": quality,
         "cookies": cookie_status,
@@ -188,7 +185,7 @@ def _build_ydl_opts(
     out_dir: str,
     quality: str = "best",
     progress_hook: Callable | None = None,
-    use_cookies: bool = False,
+    use_cookies: bool = True,
 ) -> dict:
     """Construct yt-dlp options dict optimized for maximum quality & speed."""
     fmt = _QUALITY_FORMATS.get(quality, _QUALITY_FORMATS["best"])
@@ -206,6 +203,11 @@ def _build_ydl_opts(
 
         # ── Ensure ffmpeg is used for merging separate video+audio streams ─
         "prefer_ffmpeg":        True,
+
+        # ── JS runtime: use Node.js for YouTube signature/challenge solving ─
+        # yt-dlp defaults to deno which may not be installed.
+        # Node.js is widely available and yt-dlp-ejs supports it.
+        "js_runtimes":         {"node": {}},
 
         # ── SSL / network robustness ───────────────────────────────────────
         "nocheckcertificate":  True,
@@ -244,26 +246,17 @@ def _build_ydl_opts(
             ]
         }
 
-    # ── Cookies + player client (mutually exclusive strategies) ──────────────
-    # yt-dlp automatically SKIPS ios/android clients when a cookiefile is
-    # present, leaving only mweb — which requires a GVS PO Token and yields
-    # zero formats.  So we must choose one strategy based on cookie availability:
-    #
-    #   cookies available  → web client (default) + cookiefile/cookiesfrombrowser
-    #                         Full DASH access; format "bestvideo+bestaudio" works.
-    #
-    #   no cookies found   → ios + android player clients
-    #                         Progressive MP4 streams, no PO token needed.
-    #                         Max quality ~720p on most videos.
-    cookie_opts: dict = _cookies_opt() if use_cookies else {}
+    # ── Cookies: always use youtube_cookies.txt (web client, full DASH access) ─
+    # Cookies file is always present → web client path → no PO-token issue.
+    # Full DASH streams available: bestvideo+bestaudio up to 4K works correctly.
+    cookie_opts: dict = _cookies_opt()
     if cookie_opts:
-        # Web client path: apply cookie option, do NOT set extractor_args
         opts.update(cookie_opts)
     else:
-        # No-cookie path: override player client to bypass PO-token requirement
+        # Cookies file missing/invalid — fall back to tv_embedded (no PO-token)
         opts["extractor_args"] = {
             "youtube": {
-                "player_client": ["ios", "android"],
+                "player_client": ["tv_embedded", "ios", "android"],
             }
         }
 
@@ -281,7 +274,7 @@ def download_youtube_video(
     quality: str = "best",
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
-    use_cookies: bool = False,
+    use_cookies: bool = True,
 ) -> str | None:
     """Download a single YouTube video.
 
@@ -315,8 +308,36 @@ def download_youtube_video(
             info = ydl.extract_info(url, download=True)
             if info:
                 return ydl.prepare_filename(info)
-    except Exception:
-        pass
+    except yt_dlp.utils.DownloadError as e:
+        err_msg = str(e)
+        if "Requested format is not available" in err_msg or "format" in err_msg.lower():
+            # Retry with absolute fallback: accept any available format
+            if log_fn:
+                log_fn("[YouTube] format yêu cầu không có sẵn, thử lại với format tự động...", "warn")
+            fallback_opts = _build_ydl_opts(out_dir, "best", progress_hook, use_cookies)
+            fallback_opts["format"] = "best/bestvideo+bestaudio"
+            fallback_opts["js_runtimes"] = {"node": {}}
+            # Ensure tv_embedded client is used if no cookies
+            if "extractor_args" in fallback_opts:
+                fallback_opts["extractor_args"] = {
+                    "youtube": {"player_client": ["tv_embedded", "ios", "android", "web"]}
+                }
+            try:
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
+                        if log_fn:
+                            log_fn("[YouTube] tải thành công với format fallback.", "info")
+                        return ydl.prepare_filename(info)
+            except Exception as e2:
+                if log_fn:
+                    log_fn(f"[YouTube] lỗi fallback: {e2}", "err")
+        else:
+            if log_fn:
+                log_fn(f"[YouTube] lỗi tải: {e}", "err")
+    except Exception as e:
+        if log_fn:
+            log_fn(f"[YouTube] lỗi không xác định: {e}", "err")
     return None
 
 
@@ -327,7 +348,7 @@ def download_youtube_playlist(
     max_videos: int | None = None,
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
-    use_cookies: bool = False,
+    use_cookies: bool = True,
 ) -> tuple[int, int]:
     """Download all (or up to max_videos) videos from a playlist.
 
@@ -383,7 +404,7 @@ def download_youtube_multi(
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
     max_workers: int = MAX_CONCURRENT_DOWNLOADS,
-    use_cookies: bool = False,
+    use_cookies: bool = True,
 ) -> tuple[int, int]:
     """Download multiple individual YouTube URLs concurrently.
 
@@ -434,7 +455,7 @@ def download_youtube_channel(
     use_channel_subfolder: bool = True,
     progress_hook: Callable | None = None,
     log_fn: Callable | None = None,
-    use_cookies: bool = False,
+    use_cookies: bool = True,
 ) -> tuple[int, int]:
     """Download all (or up to max_videos) videos from a YouTube channel.
 
@@ -538,7 +559,12 @@ def get_video_info(url: str) -> dict | None:
         "no_warnings":     True,
         "skip_download":   True,
         "nocheckcertificate": True,
+        "js_runtimes":     {"node": {}},
     }
+    # Use cookies if available for full format access
+    cookie_opts = _cookies_opt()
+    if cookie_opts:
+        opts.update(cookie_opts)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
