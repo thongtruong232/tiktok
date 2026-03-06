@@ -28,7 +28,7 @@ _MAX_LOG   = 300   # max log lines kept in panel
 _THUMB_W   = 192   # thumbnail width (px)
 _THUMB_H   = 108   # thumbnail height (px)  — 16:9 aspect
 _CARD_W    = 220   # video card total width
-_CARD_H    = 185   # video card total height
+_CARD_H    = 192   # video card total height  — spacer(6)+IS(6)+thumb(108)+IS(6)+title(17)+IS(6)+views(17)+IS(6)+sel(17)=189+3
 _GRID_BATCH = 24   # cards rendered per batch (initial + each "load more")
 
 # ── Navigation items (page_id, label with icon) ───────────────────────────────
@@ -323,6 +323,11 @@ class App:
                 dpg.add_theme_color(dpg.mvThemeCol_Border, _CA)
                 dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, 6)
                 dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 2)
+
+        # ── thumbnail image button: zero frame padding ────────────────────────
+        with dpg.theme(tag="th_thumb_btn"):
+            with dpg.theme_component(dpg.mvImageButton):
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 0)
 
     # ── Load logo texture ──────────────────────────────────────────────────────
     def _load_logo_texture(self):
@@ -726,19 +731,26 @@ class App:
                     card_tag = f"vcard_{idx}"
                     with dpg.child_window(tag=card_tag, width=_CARD_W,
                                           height=_CARD_H, border=True,
-                                          no_scrollbar=True):
+                                          no_scrollbar=True,
+                                          no_scroll_with_mouse=True):
                         dpg.bind_item_theme(
                             card_tag,
                             "th_vcard_sel" if is_sel else "th_vcard")
 
-                        dpg.add_image_button(
+                        # Top spacer for visual breathing room
+                        dpg.add_spacer(height=6)
+
+                        # Thumbnail — th_thumb_btn zeroes FramePadding → exact _THUMB_W×_THUMB_H px
+                        # indent=14 centers the 192px image inside 220px card
+                        img_btn = dpg.add_image_button(
                             tex_tag, width=_THUMB_W, height=_THUMB_H,
                             callback=lambda s, a, u: self._toggle_video_select(u),
-                            user_data=idx, indent=2)
+                            user_data=idx, indent=14)
+                        dpg.bind_item_theme(img_btn, "th_thumb_btn")
 
-                        title = (video.get("title") or "")[:40]
-                        dpg.add_text(title, color=_CF,
-                                     wrap=_CARD_W - 16, indent=4)
+                        # Title — truncated to 1 line (no wrap to keep fixed height)
+                        title = (video.get("title") or "")[:26]
+                        dpg.add_text(title, color=_CF, indent=4)
 
                         views = video.get("view_count", 0)
                         dur = video.get("duration", 0)
@@ -749,9 +761,11 @@ class App:
                         dpg.add_text("  ·  ".join(info_parts),
                                      color=_CF2, indent=4)
 
-                        if is_sel:
-                            dpg.add_text("✓ Đã chọn", tag=f"vsel_{idx}",
-                                         color=_CL_OK, indent=4)
+                        # Selection indicator — always rendered (empty = not selected)
+                        # Using set_value keeps card height fixed regardless of state
+                        dpg.add_text(
+                            "✓ Đã chọn" if is_sel else "",
+                            tag=f"vsel_{idx}", color=_CL_OK, indent=4)
 
                     dpg.add_spacer(width=4)
             dpg.add_spacer(height=4, parent="dl_grid")
@@ -780,20 +794,20 @@ class App:
     def _toggle_video_select(self, idx: int):
         """Toggle selection of a video card."""
         card_tag = f"vcard_{idx}"
-        sel_tag = f"vsel_{idx}"
+        sel_tag  = f"vsel_{idx}"
 
         if idx in self._search_selected:
             self._search_selected.discard(idx)
             if dpg.does_item_exist(card_tag):
                 dpg.bind_item_theme(card_tag, "th_vcard")
             if dpg.does_item_exist(sel_tag):
-                dpg.delete_item(sel_tag)
+                dpg.set_value(sel_tag, "")
         else:
             self._search_selected.add(idx)
             if dpg.does_item_exist(card_tag):
                 dpg.bind_item_theme(card_tag, "th_vcard_sel")
-                dpg.add_text("✓ Đã chọn", tag=sel_tag,
-                             color=_CL_OK, indent=4, parent=card_tag)
+            if dpg.does_item_exist(sel_tag):
+                dpg.set_value(sel_tag, "✓ Đã chọn")
 
         sel_count = len(self._search_selected)
         dpg.set_value("dl_sel_count",
@@ -806,11 +820,11 @@ class App:
             if idx not in self._search_selected:
                 self._search_selected.add(idx)
                 card_tag = f"vcard_{idx}"
+                sel_tag  = f"vsel_{idx}"
                 if dpg.does_item_exist(card_tag):
                     dpg.bind_item_theme(card_tag, "th_vcard_sel")
-                    if not dpg.does_item_exist(f"vsel_{idx}"):
-                        dpg.add_text("✓ Đã chọn", tag=f"vsel_{idx}",
-                                     color=_CL_OK, indent=4, parent=card_tag)
+                if dpg.does_item_exist(sel_tag):
+                    dpg.set_value(sel_tag, "✓ Đã chọn")
         sel_count = len(self._search_selected)
         dpg.set_value("dl_sel_count",
                       f"{sel_count} đã chọn" if sel_count else "")
@@ -820,11 +834,11 @@ class App:
         """Deselect all videos."""
         for idx in list(self._search_selected):
             card_tag = f"vcard_{idx}"
+            sel_tag  = f"vsel_{idx}"
             if dpg.does_item_exist(card_tag):
                 dpg.bind_item_theme(card_tag, "th_vcard")
-            sel_tag = f"vsel_{idx}"
             if dpg.does_item_exist(sel_tag):
-                dpg.delete_item(sel_tag)
+                dpg.set_value(sel_tag, "")
         self._search_selected.clear()
         dpg.set_value("dl_sel_count", "")
         self._update_dl_btn_label()
