@@ -652,12 +652,14 @@ def fetch_video_list(url: str, max_videos: int | None = None,
                         "url": entry.get("url")
                                or entry.get("webpage_url")
                                or f"https://www.youtube.com/watch?v={vid_id}",
-                        "title":      entry.get("title") or "Không rõ",
-                        "thumbnail":  thumb,
-                        "view_count": entry.get("view_count") or 0,
-                        "duration":   entry.get("duration") or 0,
-                        "uploader":   entry.get("uploader")
-                                      or entry.get("channel") or "",
+                        "title":         entry.get("title") or "Không rõ",
+                        "thumbnail":     thumb,
+                        "view_count":    entry.get("view_count") or 0,
+                        "duration":      entry.get("duration") or 0,
+                        "uploader":      entry.get("uploader")
+                                         or entry.get("channel") or "",
+                        "like_count":    entry.get("like_count") or 0,
+                        "comment_count": entry.get("comment_count") or 0,
                     })
             else:
                 vid_id = info.get("id", "")
@@ -670,13 +672,15 @@ def fetch_video_list(url: str, max_videos: int | None = None,
                     thumb = f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg"
 
                 results.append({
-                    "url":        info.get("webpage_url") or url,
-                    "title":      info.get("title") or "Không rõ",
-                    "thumbnail":  thumb,
-                    "view_count": info.get("view_count") or 0,
-                    "duration":   info.get("duration") or 0,
-                    "uploader":   info.get("uploader")
-                                  or info.get("channel") or "",
+                    "url":           info.get("webpage_url") or url,
+                    "title":         info.get("title") or "Không rõ",
+                    "thumbnail":     thumb,
+                    "view_count":    info.get("view_count") or 0,
+                    "duration":      info.get("duration") or 0,
+                    "uploader":      info.get("uploader")
+                                     or info.get("channel") or "",
+                    "like_count":    info.get("like_count") or 0,
+                    "comment_count": info.get("comment_count") or 0,
                 })
     except Exception:
         pass

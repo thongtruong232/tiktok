@@ -28,7 +28,7 @@ _MAX_LOG   = 300   # max log lines kept in panel
 _THUMB_W   = 192   # thumbnail width (px)
 _THUMB_H   = 108   # thumbnail height (px)  — 16:9 aspect
 _CARD_W    = 220   # video card total width
-_CARD_H    = 192   # video card total height  — spacer(6)+IS(6)+thumb(108)+IS(6)+title(17)+IS(6)+views(17)+IS(6)+sel(17)=189+3
+_CARD_H    = 215   # video card total height  — spacer(6)+thumb(108)+title(17)+views(17)+stats(17)+sel(17)+IS between items
 _GRID_BATCH = 24   # cards rendered per batch (initial + each "load more")
 
 # ── Navigation items (page_id, label with icon) ───────────────────────────────
@@ -761,6 +761,22 @@ class App:
                         dpg.add_text("  ·  ".join(info_parts),
                                      color=_CF2, indent=4)
 
+                        # Engagement stats — platform-specific (empty string keeps height fixed)
+                        is_tt    = "tiktok.com" in video.get("url", "")
+                        likes    = video.get("like_count", 0)
+                        comments = video.get("comment_count", 0)
+                        shares   = video.get("repost_count", 0)
+                        stat_parts: list[str] = []
+                        if likes:
+                            stat_parts.append(f"Like:{self._fmt_n(likes)}")
+                        if comments:
+                            stat_parts.append(f"Cmt:{self._fmt_n(comments)}")
+                        if is_tt and shares:
+                            stat_parts.append(f"Share:{self._fmt_n(shares)}")
+                        dpg.add_text(
+                            "  ".join(stat_parts) if stat_parts else "",
+                            color=_CF2, indent=4)
+
                         # Selection indicator — always rendered (empty = not selected)
                         # Using set_value keeps card height fixed regardless of state
                         dpg.add_text(
@@ -891,6 +907,15 @@ class App:
         if count >= 1_000:
             return f"{count / 1_000:.1f}K views"
         return f"{count} views"
+
+    @staticmethod
+    def _fmt_n(n: int) -> str:
+        """Format a large integer compactly without unit suffix."""
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}K"
+        return str(n)
 
     # ── Library page ───────────────────────────────────────────────────────────
     def _build_library_page(self, w: int, h: int):

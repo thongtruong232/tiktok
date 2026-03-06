@@ -270,12 +270,15 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
                 elif entry.get("thumbnail"):
                     thumb = entry["thumbnail"]
                 results.append({
-                    "url":        entry.get("url") or entry.get("webpage_url") or "",
-                    "title":      entry.get("title") or "Không rõ",
-                    "thumbnail":  thumb,
-                    "view_count": entry.get("view_count") or 0,
-                    "duration":   entry.get("duration") or 0,
-                    "uploader":   entry.get("uploader") or "",
+                    "url":           entry.get("url") or entry.get("webpage_url") or "",
+                    "title":         entry.get("title") or "Không rõ",
+                    "thumbnail":     thumb,
+                    "view_count":    entry.get("view_count") or 0,
+                    "duration":      entry.get("duration") or 0,
+                    "uploader":      entry.get("uploader") or "",
+                    "like_count":    entry.get("like_count") or 0,
+                    "comment_count": entry.get("comment_count") or 0,
+                    "repost_count":  entry.get("repost_count") or entry.get("share_count") or 0,
                 })
         else:
             thumb = ""
@@ -284,12 +287,15 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
             elif info.get("thumbnail"):
                 thumb = info["thumbnail"]
             results.append({
-                "url":        info.get("webpage_url") or url,
-                "title":      info.get("title") or "Không rõ",
-                "thumbnail":  thumb,
-                "view_count": info.get("view_count") or 0,
-                "duration":   info.get("duration") or 0,
-                "uploader":   info.get("uploader") or "",
+                "url":           info.get("webpage_url") or url,
+                "title":         info.get("title") or "Không rõ",
+                "thumbnail":     thumb,
+                "view_count":    info.get("view_count") or 0,
+                "duration":      info.get("duration") or 0,
+                "uploader":      info.get("uploader") or "",
+                "like_count":    info.get("like_count") or 0,
+                "comment_count": info.get("comment_count") or 0,
+                "repost_count":  info.get("repost_count") or info.get("share_count") or 0,
             })
         return results
 
