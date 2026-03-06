@@ -4,10 +4,25 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
-# Chỉ thêm ffmpeg.exe nếu file thực sự tồn tại
 _datas = collect_data_files('dearpygui')
-if os.path.exists('ffmpeg.exe'):
-    _datas.append(('ffmpeg.exe', '.'))
+
+# Thêm fonts nếu có
+if os.path.exists('fonts'):
+    _datas.append(('fonts', 'fonts'))
+
+# Thêm icon nếu có
+if os.path.exists('icon.ico'):
+    _datas.append(('icon.ico', '.'))
+
+# Thêm file cookies nếu muốn bundle kèm
+if os.path.exists('youtube_cookies.txt'):
+    _datas.append(('youtube_cookies.txt', '.'))
+if os.path.exists('tiktok_cookies.txt'):
+    _datas.append(('tiktok_cookies.txt', '.'))
+
+# Thêm window_config.json
+if os.path.exists('window_config.json'):
+    _datas.append(('window_config.json', '.'))
 
 a = Analysis(
     ['tk_gui.py'],
@@ -18,14 +33,20 @@ a = Analysis(
         *collect_submodules('yt_dlp'),
         *collect_submodules('dearpygui'),
         'tiktok_download',
+        'youtube_download',   # ← thêm module này
         'video_edit',
         'tkinter',
         'tkinter.filedialog',
+        'tkinter.simpledialog',
+        'screeninfo',         # ← dùng trong App.run()
+        'PIL',
+        'PIL.Image',
+        'numpy',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy.testing'],
+    excludes=['matplotlib', 'numpy.testing', 'pytest'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -39,12 +60,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='TikTokDownloader',
+    name='TTTools',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=False,   # Không hiện cửa sổ console đen
     icon='icon.ico' if os.path.exists('icon.ico') else None,
 )
 
@@ -55,6 +76,6 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    name='TikTokDownloader',
+    upx_exclude=['vcruntime140.dll'],  # Không nén DLL hệ thống
+    name='TTTools',
 )

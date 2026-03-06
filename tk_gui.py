@@ -3,17 +3,21 @@ import json
 import queue
 import time
 import threading
+import subprocess
+import urllib.request
+from io import BytesIO
 from datetime import datetime
 
 import numpy as np
 from PIL import Image
 import dearpygui.dearpygui as dpg
 
-from tiktok_download import download_tiktok_video, download_from_profile, is_tiktok_url
+from tiktok_download import (download_tiktok_video, download_from_profile,
+                              is_tiktok_url, fetch_tiktok_video_list)
 from youtube_download import (download_youtube_video, download_youtube_playlist,
                                download_youtube_multi, download_youtube_channel,
                                QUALITY_OPTIONS, get_youtube_runtime_context,
-                               is_youtube_url)
+                               is_youtube_url, fetch_video_list)
 import video_edit
 
 # ── Layout constants ───────────────────────────────────────────────────────────
@@ -21,6 +25,10 @@ _SIDEBAR_W = 145
 _LOG_W     = 310
 _HDR_H     = 68
 _MAX_LOG   = 300   # max log lines kept in panel
+_THUMB_W   = 192   # thumbnail width (px)
+_THUMB_H   = 108   # thumbnail height (px)  — 16:9 aspect
+_CARD_W    = 220   # video card total width
+_CARD_H    = 185   # video card total height
 
 # ── Navigation items (page_id, label with icon) ───────────────────────────────
 _NAV_ITEMS = [
@@ -68,6 +76,12 @@ class App:
         # ── Edit / Batch state ────────────────────────────────────────────
         self._current_edit_tab: str         = "Resize"   # tracks selected tab
         self._current_dl_platform: str      = "tiktok"   # tracks active download platform
+        # ── Search / Grid state ───────────────────────────────────────────
+        self._search_results: list[dict]    = []          # fetched video info dicts
+        self._search_selected: set[int]     = set()       # indices of selected videos
+        self._thumb_textures: dict[int, str] = {}         # index → texture tag
+        self._thumb_counter: int            = 0           # unique texture tag counter
+        self._searching: bool               = False       # search in progress flag
         self._merge_items: list[str]        = []          # merge listbox items
         self._batch_items: list[str]        = []          # batch listbox items
         # ── Library state ─────────────────────────────────────────────────
@@ -292,6 +306,21 @@ class App:
                 dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 14)
                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding,  14, 12)
 
+        # ── video card: not selected ─────────────────────────────────────────
+        with dpg.theme(tag="th_vcard"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, _CC)
+                dpg.add_theme_color(dpg.mvThemeCol_Border, _CB)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, 6)
+
+        # ── video card: selected ─────────────────────────────────────────────
+        with dpg.theme(tag="th_vcard_sel"):
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (35, 35, 35, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_Border, _CA)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 2)
+
     # ── Load logo texture ──────────────────────────────────────────────────────
     def _load_logo_texture(self):
         """Load logo image and create a DPG static texture."""
@@ -421,177 +450,83 @@ class App:
                       "Tải video từ nhiều nền tảng")
 
             with dpg.child_window(tag="dl_scroll", width=w, height=h - _HDR_H,
-                                  border=False, no_scrollbar=True):
+                                  border=False):
                 dpg.bind_item_theme("dl_scroll", "th_main")
-                dpg.add_spacer(height=12)
+                dpg.add_spacer(height=8)
 
-                # ── Platform tab bar ──────────────────────────────────────────
-                with dpg.tab_bar(tag="dl_platform_tabs",
-                                 callback=self._on_platform_tab_change):
-
-                    # ── TikTok tab ────────────────────────────────────────────
-                    with dpg.tab(label="  TikTok  ", tag="dl_tab_tiktok"):
-                        dpg.add_spacer(height=10)
-                        t = dpg.add_text("Chọn loại link để tải video", indent=20)
-                        if dpg.does_item_exist("f_bold"):
-                            dpg.bind_item_font(t, "f_bold")
-                        # dpg.add_text("Hỗ trợ:  Single Video  |  Profile  |  Nhiều URLs",
-                        #              color=_CF2, indent=20)
-                        dpg.add_spacer(height=10)
-
-                        dpg.add_radio_button(
-                            tag="dl_mode",
-                            items=["Single Video", "Profile", "Nhiều URLs"],
-                            default_value="Single Video", horizontal=True, indent=20,
-                            callback=self._on_dl_mode_change)
-                        dpg.add_spacer(height=12)
-
-                        with dpg.child_window(tag="dl_card_single", height=90,
-                                              border=True, indent=16):
-                            dpg.add_text("VIDEO URL", color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            with dpg.group(horizontal=True):
-                                dpg.add_input_text(tag="url_single", width=-80,
-                                                   hint="https://www.tiktok.com/@user/video/...")
-                                dpg.add_button(label="Dán", width=70,
-                                               callback=self._paste_single)
-
-                        with dpg.child_window(tag="dl_card_profile", height=120,
-                                              border=True, indent=16):
-                            dpg.add_text("PROFILE URL", color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            dpg.add_input_text(tag="url_profile", width=-8,
-                                               hint="https://www.tiktok.com/@username")
-                            dpg.add_spacer(height=8)
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
-                                dpg.add_spacer(width=8)
-                                dpg.add_input_text(tag="max_videos", width=160,
-                                                   hint="để trống = tất cả")
-                        dpg.hide_item("dl_card_profile")
-
-                        with dpg.child_window(tag="dl_card_multi", height=200,
-                                              border=True, indent=16):
-                            dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)",
-                                         color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            dpg.add_input_text(tag="multi_text", multiline=True,
-                                               width=-8, height=148)
-                        dpg.hide_item("dl_card_multi")
-                        dpg.add_spacer(height=8)
-
-                    # ── YouTube tab ───────────────────────────────────────────
-                    with dpg.tab(label="  YouTube  ", tag="dl_tab_youtube"):
-                        dpg.add_spacer(height=10)
-                        t = dpg.add_text("Tải video từ YouTube", indent=20)
-                        if dpg.does_item_exist("f_bold"):
-                            dpg.bind_item_font(t, "f_bold")
-                        # dpg.add_text("Hỗ trợ:  Video đơn  |  Playlist  |  Nhiều URLs",
-                        #              color=_CF2, indent=20)
-                        dpg.add_spacer(height=10)
-
-                        dpg.add_radio_button(
-                            tag="yt_mode",
-                            items=["Video đơn", "Playlist", "Nhiều URLs", "Kênh"],
-                            default_value="Video đơn", horizontal=True, indent=20,
-                            callback=self._on_yt_mode_change)
-                        dpg.add_spacer(height=12)
-
-                        with dpg.child_window(tag="yt_card_single", height=90,
-                                              border=True, indent=16):
-                            dpg.add_text("VIDEO URL", color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            with dpg.group(horizontal=True):
-                                dpg.add_input_text(
-                                    tag="yt_url_single", width=-80,
-                                    hint="https://www.youtube.com/watch?v=...")
-                                dpg.add_button(
-                                    label="Dán", width=70,
-                                    callback=lambda: self._paste_to("yt_url_single"))
-
-                        with dpg.child_window(tag="yt_card_playlist", height=120,
-                                              border=True, indent=16):
-                            dpg.add_text("PLAYLIST / CHANNEL URL", color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            dpg.add_input_text(
-                                tag="yt_playlist_url", width=-8,
-                                hint="https://www.youtube.com/playlist?list=...")
-                            dpg.add_spacer(height=8)
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
-                                dpg.add_spacer(width=8)
-                                dpg.add_input_text(tag="yt_max_items", width=160,
-                                                   hint="để trống = tất cả")
-                        dpg.hide_item("yt_card_playlist")
-
-                        with dpg.child_window(tag="yt_card_multi", height=200,
-                                              border=True, indent=16):
-                            dpg.add_text("DANH SÁCH URL  (mỗi dòng 1 link)",
-                                         color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            dpg.add_input_text(tag="yt_multi_text", multiline=True,
-                                               width=-8, height=148)
-                        dpg.hide_item("yt_card_multi")
-
-                        with dpg.child_window(tag="yt_card_channel", height=150,
-                                              border=True, indent=16):
-                            dpg.add_text("CHANNEL URL", color=_CF2, indent=16)
-                            dpg.add_spacer(height=6)
-                            with dpg.group(horizontal=True):
-                                dpg.add_input_text(
-                                    tag="yt_channel_url", width=-80,
-                                    hint="https://www.youtube.com/@handle")
-                                dpg.add_button(
-                                    label="Dán", width=70,
-                                    callback=lambda: self._paste_to("yt_channel_url"))
-                            dpg.add_spacer(height=10)
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("Số video tối đa:", color=_CF2, indent=16)
-                                dpg.add_spacer(width=8)
-                                dpg.add_input_text(tag="yt_ch_max", width=160,
-                                                   hint="để trống = tất cả")
-                            dpg.add_spacer(height=8)
-                            dpg.add_checkbox(tag="yt_ch_subfolder",
-                                             label="Lưu vào thư mục riêng theo tên kênh",
-                                             default_value=True, indent=16)
-                        dpg.hide_item("yt_card_channel")
-
-                        dpg.add_spacer(height=10)
-                        with dpg.child_window(height=52, border=True, indent=16):
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("CHẤT LƯỢNG:", color=_CF2, indent=16)
-                                dpg.add_spacer(width=8)
-                                dpg.add_combo(
-                                    tag="yt_quality",
-                                    items=QUALITY_OPTIONS,
-                                    default_value="best",
-                                    width=160)
-
-                        dpg.add_spacer(height=8)
-
-                dpg.add_spacer(height=14)
-
-                # ── Shared: Output folder ─────────────────────────────────────
-                with dpg.child_window(height=82, border=True, indent=16):
-                    dpg.add_text("THƯ MỤC LƯU VIDEO", color=_CF2, indent=16)
-                    dpg.add_spacer(height=6)
+                # ── Search bar ────────────────────────────────────────────
+                with dpg.child_window(height=74, border=True, indent=16):
+                    dpg.add_text("TÌM KIẾM VIDEO", color=_CF2, indent=16)
+                    dpg.add_spacer(height=4)
                     with dpg.group(horizontal=True):
+                        dpg.add_input_text(
+                            tag="dl_search_url", width=-200,
+                            hint="Nhập URL video, kênh, hoặc playlist...",
+                            on_enter=True, callback=self._search_videos)
+                        dpg.add_button(label="Dán", width=55,
+                                       callback=lambda: self._paste_to("dl_search_url"))
+                        dpg.add_spacer(width=4)
+                        search_btn = dpg.add_button(
+                            label="Tìm kiếm", tag="dl_search_btn",
+                            width=100, callback=self._search_videos)
+                        dpg.bind_item_theme(search_btn, "th_accent")
+
+                dpg.add_spacer(height=6)
+
+                # ── Options: quality + output folder ──────────────────────
+                with dpg.child_window(height=44, border=True, indent=16):
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("CHẤT LƯỢNG:", color=_CF2, indent=16)
+                        dpg.add_spacer(width=4)
+                        dpg.add_combo(
+                            tag="dl_quality",
+                            items=QUALITY_OPTIONS,
+                            default_value="best",
+                            width=120)
+                        dpg.add_spacer(width=24)
+                        dpg.add_text("THƯ MỤC:", color=_CF2)
+                        dpg.add_spacer(width=4)
                         dpg.add_input_text(tag="dl_out", default_value="downloads",
                                            width=-230)
-                        dpg.add_button(label="Duyệt...", width=84,
+                        dpg.add_button(label="Duyệt...", width=80,
                                        callback=lambda: self._browse_dir("dl_out"))
                         dpg.add_spacer(width=4)
-                        dpg.add_button(label="Mở thư mục", width=90,
+                        dpg.add_button(label="Mở", width=45,
                                        callback=self._open_output)
 
-                dpg.add_spacer(height=14)
-                dl_btn = dpg.add_button(label="Bắt đầu tải", tag="dl_btn",
-                                        width=-16, height=44, indent=16,
-                                        callback=self.start_download)
+                dpg.add_spacer(height=6)
+
+                # ── Results toolbar ───────────────────────────────────────
+                with dpg.group(horizontal=True, indent=16):
+                    dpg.add_text("", tag="dl_result_count", color=_CF2)
+                    dpg.add_spacer(width=20)
+                    dpg.add_button(label="Chọn tất cả", width=100,
+                                   callback=self._select_all_videos)
+                    dpg.add_spacer(width=6)
+                    dpg.add_button(label="Bỏ chọn", width=80,
+                                   callback=self._deselect_all_videos)
+                    dpg.add_spacer(width=20)
+                    dpg.add_text("", tag="dl_sel_count", color=_CA)
+
+                dpg.add_spacer(height=4)
+
+                # ── Video grid (scrollable) ───────────────────────────────
+                with dpg.child_window(tag="dl_grid", height=-220, border=False):
+                    dpg.bind_item_theme("dl_grid", "th_main")
+                    dpg.add_text(
+                        "Nhập URL và nhấn Tìm kiếm để hiển thị video.",
+                        color=_CF3, indent=20, tag="dl_grid_placeholder")
+
+                # ── Download button + progress ────────────────────────────
+                dpg.add_spacer(height=6)
+                dl_btn = dpg.add_button(
+                    label="Tải video đã chọn", tag="dl_btn",
+                    width=-16, height=38, indent=16,
+                    callback=self._start_download_selected)
                 dpg.bind_item_theme(dl_btn, "th_accent")
                 if dpg.does_item_exist("f_bold"):
                     dpg.bind_item_font(dl_btn, "f_bold")
-                dpg.add_spacer(height=8)
+                dpg.add_spacer(height=6)
                 dpg.add_progress_bar(tag="dl_prog", width=-16, height=5,
                                      indent=16, default_value=0.0)
 
@@ -657,6 +592,255 @@ class App:
                 dpg.set_value(tag, text)
         except Exception:
             pass
+
+    # ── Search & Video Grid ────────────────────────────────────────────────────
+    def _search_videos(self, sender=None, app_data=None):
+        """Start video search from the URL input."""
+        url = dpg.get_value("dl_search_url").strip()
+        if not url:
+            self._log("Vui lòng nhập URL.", "err")
+            return
+        if self._searching:
+            self._log("Đang tìm kiếm, vui lòng chờ...", "info")
+            return
+        self._searching = True
+        dpg.configure_item("dl_search_btn", enabled=False)
+        self._log(f"Đang tìm kiếm: {url}", "info")
+        threading.Thread(target=self._search_worker, args=(url,),
+                         daemon=True).start()
+
+    def _search_worker(self, url: str):
+        """Background worker to fetch video list."""
+        try:
+            if is_youtube_url(url):
+                results = fetch_video_list(url, max_videos=50)
+                platform = "youtube"
+            elif is_tiktok_url(url):
+                results = fetch_tiktok_video_list(url, max_videos=50)
+                platform = "tiktok"
+            else:
+                self._log(
+                    "URL không được hỗ trợ. Hãy nhập URL YouTube hoặc TikTok.",
+                    "err")
+                return
+
+            for r in results:
+                r["platform"] = platform
+
+            self._search_results = results
+            self._search_selected.clear()
+
+            # Auto-select if only 1 result
+            if len(results) == 1:
+                self._search_selected.add(0)
+
+            count = len(results)
+            self._log(f"Tìm thấy {count} video.", "ok" if count > 0 else "info")
+
+            # Rebuild grid on render thread
+            self._log_queue.put(("ui", self._rebuild_video_grid))
+
+        except Exception as e:
+            self._log(f"Lỗi tìm kiếm: {e}", "err")
+        finally:
+            self._searching = False
+            self._log_queue.put(("ui", lambda: dpg.configure_item(
+                "dl_search_btn", enabled=True)))
+
+    def _rebuild_video_grid(self):
+        """Rebuild the video grid from search results.  Runs on render thread."""
+        # Clear existing grid content
+        if dpg.does_item_exist("dl_grid"):
+            children = dpg.get_item_children("dl_grid", slot=1)
+            if children:
+                for c in children:
+                    dpg.delete_item(c)
+
+        # Clean up old textures
+        for tag in self._thumb_textures.values():
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        self._thumb_textures.clear()
+
+        total = len(self._search_results)
+        sel_count = len(self._search_selected)
+
+        dpg.set_value(
+            "dl_result_count",
+            f"{total} video tìm thấy" if total else "Không tìm thấy video")
+        dpg.set_value(
+            "dl_sel_count",
+            f"{sel_count} đã chọn" if sel_count else "")
+        self._update_dl_btn_label()
+
+        if total == 0:
+            dpg.add_text("Không tìm thấy video nào.",
+                         parent="dl_grid", color=_CF3, indent=20)
+            return
+
+        # Calculate grid columns
+        try:
+            grid_w = dpg.get_item_width("dl_grid")
+            if grid_w <= 0:
+                grid_w = dpg.get_item_width("content_host") - 40
+        except Exception:
+            grid_w = 800
+        cols = max(1, (grid_w - 20) // _CARD_W)
+
+        # Placeholder pixel data (dark gray)
+        placeholder = [0.15, 0.15, 0.15, 1.0] * (_THUMB_W * _THUMB_H)
+
+        # Create video cards in grid rows
+        for row_start in range(0, total, cols):
+            with dpg.group(horizontal=True, parent="dl_grid", indent=8):
+                for idx in range(row_start, min(row_start + cols, total)):
+                    video = self._search_results[idx]
+                    is_sel = idx in self._search_selected
+
+                    # Dynamic texture for thumbnail
+                    tex_tag = f"vthumb_{self._thumb_counter}"
+                    self._thumb_counter += 1
+                    with dpg.texture_registry():
+                        dpg.add_dynamic_texture(
+                            _THUMB_W, _THUMB_H, placeholder, tag=tex_tag)
+                    self._thumb_textures[idx] = tex_tag
+
+                    # Card child window
+                    card_tag = f"vcard_{idx}"
+                    with dpg.child_window(tag=card_tag, width=_CARD_W,
+                                          height=_CARD_H, border=True,
+                                          no_scrollbar=True):
+                        dpg.bind_item_theme(
+                            card_tag,
+                            "th_vcard_sel" if is_sel else "th_vcard")
+
+                        # Clickable thumbnail
+                        dpg.add_image_button(
+                            tex_tag, width=_THUMB_W, height=_THUMB_H,
+                            callback=lambda s, a, u: self._toggle_video_select(u),
+                            user_data=idx, indent=2)
+
+                        # Title (truncated)
+                        title = (video.get("title") or "")[:40]
+                        dpg.add_text(title, color=_CF,
+                                     wrap=_CARD_W - 16, indent=4)
+
+                        # Views + duration
+                        views = video.get("view_count", 0)
+                        dur = video.get("duration", 0)
+                        info_parts = [self._format_views(views)]
+                        if dur:
+                            m, s = divmod(int(dur), 60)
+                            info_parts.append(f"{m}:{s:02d}")
+                        dpg.add_text("  ·  ".join(info_parts),
+                                     color=_CF2, indent=4)
+
+                        # Selection indicator
+                        if is_sel:
+                            dpg.add_text("✓ Đã chọn", tag=f"vsel_{idx}",
+                                         color=_CL_OK, indent=4)
+
+                    dpg.add_spacer(width=4)
+            dpg.add_spacer(height=4, parent="dl_grid")
+
+        # Load real thumbnails in background
+        threading.Thread(target=self._load_thumbnails, daemon=True).start()
+
+    def _toggle_video_select(self, idx: int):
+        """Toggle selection of a video card."""
+        card_tag = f"vcard_{idx}"
+        sel_tag = f"vsel_{idx}"
+
+        if idx in self._search_selected:
+            self._search_selected.discard(idx)
+            if dpg.does_item_exist(card_tag):
+                dpg.bind_item_theme(card_tag, "th_vcard")
+            if dpg.does_item_exist(sel_tag):
+                dpg.delete_item(sel_tag)
+        else:
+            self._search_selected.add(idx)
+            if dpg.does_item_exist(card_tag):
+                dpg.bind_item_theme(card_tag, "th_vcard_sel")
+                dpg.add_text("✓ Đã chọn", tag=sel_tag,
+                             color=_CL_OK, indent=4, parent=card_tag)
+
+        sel_count = len(self._search_selected)
+        dpg.set_value("dl_sel_count",
+                      f"{sel_count} đã chọn" if sel_count else "")
+        self._update_dl_btn_label()
+
+    def _select_all_videos(self):
+        """Select all videos in search results."""
+        for idx in range(len(self._search_results)):
+            if idx not in self._search_selected:
+                self._search_selected.add(idx)
+                card_tag = f"vcard_{idx}"
+                if dpg.does_item_exist(card_tag):
+                    dpg.bind_item_theme(card_tag, "th_vcard_sel")
+                    if not dpg.does_item_exist(f"vsel_{idx}"):
+                        dpg.add_text("✓ Đã chọn", tag=f"vsel_{idx}",
+                                     color=_CL_OK, indent=4, parent=card_tag)
+        sel_count = len(self._search_selected)
+        dpg.set_value("dl_sel_count",
+                      f"{sel_count} đã chọn" if sel_count else "")
+        self._update_dl_btn_label()
+
+    def _deselect_all_videos(self):
+        """Deselect all videos."""
+        for idx in list(self._search_selected):
+            card_tag = f"vcard_{idx}"
+            if dpg.does_item_exist(card_tag):
+                dpg.bind_item_theme(card_tag, "th_vcard")
+            sel_tag = f"vsel_{idx}"
+            if dpg.does_item_exist(sel_tag):
+                dpg.delete_item(sel_tag)
+        self._search_selected.clear()
+        dpg.set_value("dl_sel_count", "")
+        self._update_dl_btn_label()
+
+    def _update_dl_btn_label(self):
+        """Update download button label with selection count."""
+        n = len(self._search_selected)
+        label = f"Tải video đã chọn ({n})" if n else "Tải video đã chọn"
+        dpg.configure_item("dl_btn", label=label)
+
+    def _load_thumbnails(self):
+        """Download and load thumbnail images in background."""
+        for idx, video in enumerate(self._search_results):
+            thumb_url = video.get("thumbnail", "")
+            if not thumb_url:
+                continue
+            tex_tag = self._thumb_textures.get(idx)
+            if not tex_tag:
+                continue
+            try:
+                req = urllib.request.Request(
+                    thumb_url,
+                    headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    img_bytes = resp.read()
+                img = Image.open(BytesIO(img_bytes)).convert("RGBA")
+                img = img.resize((_THUMB_W, _THUMB_H), Image.Resampling.LANCZOS)
+                data = (np.array(img).astype(np.float32) / 255.0
+                        ).flatten().tolist()
+
+                _t, _d = tex_tag, data
+                self._log_queue.put(("ui", lambda t=_t, d=_d: (
+                    dpg.set_value(t, d) if dpg.does_item_exist(t) else None
+                )))
+            except Exception:
+                continue
+
+    @staticmethod
+    def _format_views(count: int) -> str:
+        """Format view count to human-readable string."""
+        if not count:
+            return "N/A views"
+        if count >= 1_000_000:
+            return f"{count / 1_000_000:.1f}M views"
+        if count >= 1_000:
+            return f"{count / 1_000:.1f}K views"
+        return f"{count} views"
 
     # ── Library page ───────────────────────────────────────────────────────────
     def _build_library_page(self, w: int, h: int):
@@ -1915,6 +2099,63 @@ class App:
         self._refresh_batch_list_display()
 
     # ── Download logic ─────────────────────────────────────────────────────────
+    def _start_download_selected(self):
+        """Download all selected videos from search results."""
+        if not self._search_selected:
+            self._log("Vui lòng chọn ít nhất một video để tải.", "err")
+            return
+
+        out = dpg.get_value("dl_out").strip() or "downloads"
+        quality = dpg.get_value("dl_quality") or "best"
+        use_cookies = True
+
+        self._activity_id += 1
+        act = self._activity_id
+
+        # Build targets from selected videos
+        targets = []
+        for idx in sorted(self._search_selected):
+            if idx >= len(self._search_results):
+                continue
+            video = self._search_results[idx]
+            url = video.get("url", "")
+            if not url:
+                continue
+            platform = video.get("platform", "")
+            if platform == "youtube":
+                targets.append(("yt_single", (url, quality, use_cookies)))
+            elif platform == "tiktok":
+                targets.append(("tt_single", url))
+            elif is_youtube_url(url):
+                targets.append(("yt_single", (url, quality, use_cookies)))
+            elif is_tiktok_url(url):
+                targets.append(("tt_single", url))
+
+        if not targets:
+            self._log("Không có URL hợp lệ để tải.", "err")
+            return
+
+        self._log(
+            f"[Activity #{act}] Bắt đầu tải {len(targets)} video"
+            f" | quality={quality}",
+            "info")
+
+        if not os.path.exists(out):
+            try:
+                os.makedirs(out)
+                self._log(f"[Activity #{act}] Tạo thư mục: {out}", "ok")
+            except Exception as e:
+                self._log(f"Không thể tạo thư mục: {e}", "err")
+                return
+        else:
+            self._log(
+                f"[Activity #{act}] Output: {os.path.abspath(out)}", "info")
+
+        dpg.configure_item("dl_btn", enabled=False)
+        dpg.set_value("dl_prog", 0.0)
+        threading.Thread(target=self._worker, args=(targets, out, act),
+                         daemon=True).start()
+
     def start_download(self):
         platform = self._current_dl_platform   # "tiktok" | "youtube"
         out = dpg.get_value("dl_out").strip() or "downloads"

@@ -570,3 +570,80 @@ def get_video_info(url: str) -> dict | None:
             return ydl.extract_info(url, download=False)
     except Exception:
         return None
+
+
+def fetch_video_list(url: str, max_videos: int | None = None,
+                     use_cookies: bool = True) -> list[dict]:
+    """Fetch video metadata from a YouTube URL (video, playlist, or channel).
+
+    Returns list of dicts: {url, title, thumbnail, view_count, duration, uploader}
+    """
+    opts: dict = {
+        "quiet":              True,
+        "no_warnings":        True,
+        "skip_download":      True,
+        "nocheckcertificate": True,
+        "ignoreerrors":       True,
+        "extract_flat":       "in_playlist",
+        "js_runtimes":        {"node": {}},
+    }
+    if use_cookies:
+        opts.update(_cookies_opt())
+    if max_videos:
+        opts["playlistend"] = max_videos
+
+    results: list[dict] = []
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return results
+
+            entries = info.get("entries")
+            if entries:
+                for entry in entries:
+                    if entry is None:
+                        continue
+                    vid_id = entry.get("id", "")
+                    thumb = ""
+                    if entry.get("thumbnails"):
+                        thumb = entry["thumbnails"][-1].get("url", "")
+                    elif entry.get("thumbnail"):
+                        thumb = entry["thumbnail"]
+                    if not thumb and vid_id:
+                        thumb = f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg"
+
+                    results.append({
+                        "url": entry.get("url")
+                               or entry.get("webpage_url")
+                               or f"https://www.youtube.com/watch?v={vid_id}",
+                        "title":      entry.get("title") or "Không rõ",
+                        "thumbnail":  thumb,
+                        "view_count": entry.get("view_count") or 0,
+                        "duration":   entry.get("duration") or 0,
+                        "uploader":   entry.get("uploader")
+                                      or entry.get("channel") or "",
+                    })
+            else:
+                vid_id = info.get("id", "")
+                thumb = ""
+                if info.get("thumbnails"):
+                    thumb = info["thumbnails"][-1].get("url", "")
+                elif info.get("thumbnail"):
+                    thumb = info["thumbnail"]
+                if not thumb and vid_id:
+                    thumb = f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg"
+
+                results.append({
+                    "url":        info.get("webpage_url") or url,
+                    "title":      info.get("title") or "Không rõ",
+                    "thumbnail":  thumb,
+                    "view_count": info.get("view_count") or 0,
+                    "duration":   info.get("duration") or 0,
+                    "uploader":   info.get("uploader")
+                                  or info.get("channel") or "",
+                })
+    except Exception:
+        pass
+
+    return results
