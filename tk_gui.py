@@ -29,6 +29,7 @@ _THUMB_W   = 192   # thumbnail width (px)
 _THUMB_H   = 108   # thumbnail height (px)  — 16:9 aspect
 _CARD_W    = 220   # video card total width
 _CARD_H    = 185   # video card total height
+_GRID_BATCH = 24   # cards rendered per batch (initial + each "load more")
 
 # ── Navigation items (page_id, label with icon) ───────────────────────────────
 _NAV_ITEMS = [
@@ -81,6 +82,8 @@ class App:
         self._search_selected: set[int]     = set()       # indices of selected videos
         self._thumb_textures: dict[int, str] = {}         # index → texture tag
         self._thumb_counter: int            = 0           # unique texture tag counter
+        self._thumb_loaded: set[int]        = set()        # indices whose thumbnails are downloaded
+        self._grid_rendered_count: int      = 0            # how many cards currently rendered
         self._searching: bool               = False       # search in progress flag
         self._merge_items: list[str]        = []          # merge listbox items
         self._batch_items: list[str]        = []          # batch listbox items
@@ -613,10 +616,10 @@ class App:
         """Background worker to fetch video list."""
         try:
             if is_youtube_url(url):
-                results = fetch_video_list(url, max_videos=50)
+                results = fetch_video_list(url)
                 platform = "youtube"
             elif is_tiktok_url(url):
-                results = fetch_tiktok_video_list(url, max_videos=50)
+                results = fetch_tiktok_video_list(url)
                 platform = "tiktok"
             else:
                 self._log(
@@ -648,7 +651,7 @@ class App:
                 "dl_search_btn", enabled=True)))
 
     def _rebuild_video_grid(self):
-        """Rebuild the video grid from search results.  Runs on render thread."""
+        """Reset grid state and render first batch. Runs on render thread."""
         # Clear existing grid content
         if dpg.does_item_exist("dl_grid"):
             children = dpg.get_item_children("dl_grid", slot=1)
@@ -661,6 +664,8 @@ class App:
             if dpg.does_item_exist(tag):
                 dpg.delete_item(tag)
         self._thumb_textures.clear()
+        self._thumb_loaded.clear()
+        self._grid_rendered_count = 0
 
         total = len(self._search_results)
         sel_count = len(self._search_selected)
@@ -678,7 +683,22 @@ class App:
                          parent="dl_grid", color=_CF3, indent=20)
             return
 
-        # Calculate grid columns
+        # Render first batch
+        self._render_grid_batch()
+
+    def _render_grid_batch(self):
+        """Render the next _GRID_BATCH cards and add 'load more' if needed.
+        Runs on render thread (called directly or from button callback)."""
+        total = len(self._search_results)
+        start = self._grid_rendered_count
+        if start >= total:
+            return
+
+        # Remove 'load more' sentinel so we can append new rows above it
+        if dpg.does_item_exist("dl_load_more_grp"):
+            dpg.delete_item("dl_load_more_grp")
+
+        # Calculate columns from current grid width
         try:
             grid_w = dpg.get_item_width("dl_grid")
             if grid_w <= 0:
@@ -687,17 +707,15 @@ class App:
             grid_w = 800
         cols = max(1, (grid_w - 20) // _CARD_W)
 
-        # Placeholder pixel data (dark gray)
+        end = min(start + _GRID_BATCH, total)
         placeholder = [0.15, 0.15, 0.15, 1.0] * (_THUMB_W * _THUMB_H)
 
-        # Create video cards in grid rows
-        for row_start in range(0, total, cols):
+        for row_start in range(start, end, cols):
             with dpg.group(horizontal=True, parent="dl_grid", indent=8):
-                for idx in range(row_start, min(row_start + cols, total)):
+                for idx in range(row_start, min(row_start + cols, end)):
                     video = self._search_results[idx]
                     is_sel = idx in self._search_selected
 
-                    # Dynamic texture for thumbnail
                     tex_tag = f"vthumb_{self._thumb_counter}"
                     self._thumb_counter += 1
                     with dpg.texture_registry():
@@ -705,7 +723,6 @@ class App:
                             _THUMB_W, _THUMB_H, placeholder, tag=tex_tag)
                     self._thumb_textures[idx] = tex_tag
 
-                    # Card child window
                     card_tag = f"vcard_{idx}"
                     with dpg.child_window(tag=card_tag, width=_CARD_W,
                                           height=_CARD_H, border=True,
@@ -714,18 +731,15 @@ class App:
                             card_tag,
                             "th_vcard_sel" if is_sel else "th_vcard")
 
-                        # Clickable thumbnail
                         dpg.add_image_button(
                             tex_tag, width=_THUMB_W, height=_THUMB_H,
                             callback=lambda s, a, u: self._toggle_video_select(u),
                             user_data=idx, indent=2)
 
-                        # Title (truncated)
                         title = (video.get("title") or "")[:40]
                         dpg.add_text(title, color=_CF,
                                      wrap=_CARD_W - 16, indent=4)
 
-                        # Views + duration
                         views = video.get("view_count", 0)
                         dur = video.get("duration", 0)
                         info_parts = [self._format_views(views)]
@@ -735,7 +749,6 @@ class App:
                         dpg.add_text("  ·  ".join(info_parts),
                                      color=_CF2, indent=4)
 
-                        # Selection indicator
                         if is_sel:
                             dpg.add_text("✓ Đã chọn", tag=f"vsel_{idx}",
                                          color=_CL_OK, indent=4)
@@ -743,8 +756,26 @@ class App:
                     dpg.add_spacer(width=4)
             dpg.add_spacer(height=4, parent="dl_grid")
 
-        # Load real thumbnails in background
-        threading.Thread(target=self._load_thumbnails, daemon=True).start()
+        self._grid_rendered_count = end
+
+        # Show 'load more' button if there are remaining cards
+        remaining = total - end
+        if remaining > 0:
+            with dpg.group(tag="dl_load_more_grp", parent="dl_grid", indent=8):
+                dpg.add_spacer(height=4)
+                load_btn = dpg.add_button(
+                    label=f"▼  Hiển thị thêm {min(remaining, _GRID_BATCH)} video"
+                          f"  ({remaining} còn lại / {total} tổng)",
+                    tag="dl_load_more_btn",
+                    width=-20, height=36,
+                    callback=lambda: self._render_grid_batch())
+                dpg.bind_item_theme(load_btn, "th_accent")
+                dpg.add_spacer(height=8)
+
+        # Load thumbnails only for this new batch
+        new_indices = list(range(start, end))
+        threading.Thread(target=self._load_thumbnails_range,
+                         args=(new_indices,), daemon=True).start()
 
     def _toggle_video_select(self, idx: int):
         """Toggle selection of a video card."""
@@ -804,9 +835,14 @@ class App:
         label = f"Tải video đã chọn ({n})" if n else "Tải video đã chọn"
         dpg.configure_item("dl_btn", label=label)
 
-    def _load_thumbnails(self):
-        """Download and load thumbnail images in background."""
-        for idx, video in enumerate(self._search_results):
+    def _load_thumbnails_range(self, indices: list[int]):
+        """Download thumbnails only for the given card indices (background thread)."""
+        for idx in indices:
+            if idx in self._thumb_loaded:
+                continue
+            if idx >= len(self._search_results):
+                continue
+            video = self._search_results[idx]
             thumb_url = video.get("thumbnail", "")
             if not thumb_url:
                 continue
@@ -823,7 +859,7 @@ class App:
                 img = img.resize((_THUMB_W, _THUMB_H), Image.Resampling.LANCZOS)
                 data = (np.array(img).astype(np.float32) / 255.0
                         ).flatten().tolist()
-
+                self._thumb_loaded.add(idx)
                 _t, _d = tex_tag, data
                 self._log_queue.put(("ui", lambda t=_t, d=_d: (
                     dpg.set_value(t, d) if dpg.does_item_exist(t) else None
