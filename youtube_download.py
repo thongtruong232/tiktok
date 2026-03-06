@@ -204,11 +204,6 @@ def _build_ydl_opts(
         # ── Ensure ffmpeg is used for merging separate video+audio streams ─
         "prefer_ffmpeg":        True,
 
-        # ── JS runtime: use Node.js for YouTube signature/challenge solving ─
-        # yt-dlp defaults to deno which may not be installed.
-        # Node.js is widely available and yt-dlp-ejs supports it.
-        "js_runtimes":         {"node": {}},
-
         # ── SSL / network robustness ───────────────────────────────────────
         "nocheckcertificate":  True,
         "retries":             10,
@@ -218,6 +213,9 @@ def _build_ydl_opts(
 
         # ── Concurrent fragment downloads (yt-dlp -N) ─────────────────────
         "concurrent_fragment_downloads": 8,
+
+        # ── JS runtime for YouTube signature/challenge solving ─────────────
+        "js_runtimes":         {"node": {}},
         # format_sort intentionally omitted — it conflicts with explicit format
         # strings and causes "Requested format is not available" errors.
         # The format string above already encodes all quality/fallback logic.
@@ -246,17 +244,18 @@ def _build_ydl_opts(
             ]
         }
 
-    # ── Cookies: always use youtube_cookies.txt (web client, full DASH access) ─
-    # Cookies file is always present → web client path → no PO-token issue.
-    # Full DASH streams available: bestvideo+bestaudio up to 4K works correctly.
+    # ── Player clients + Cookies ──────────────────────────────────────────────
+    # When cookies are present: use yt-dlp default (web client + cookies).
+    #   Web + fresh session cookies = full DASH access, best quality.
+    # When no cookies: tv_embedded + mweb bypass PO-token for public videos.
     cookie_opts: dict = _cookies_opt()
     if cookie_opts:
+        # Don't override player_client — let yt-dlp's default web client use cookies
         opts.update(cookie_opts)
     else:
-        # Cookies file missing/invalid — fall back to tv_embedded (no PO-token)
         opts["extractor_args"] = {
             "youtube": {
-                "player_client": ["tv_embedded", "ios", "android"],
+                "player_client": ["tv_embedded", "mweb"],
             }
         }
 
@@ -297,7 +296,7 @@ def download_youtube_video(
         ctx = get_youtube_runtime_context(quality, use_cookies)
         log_fn(
             "[YouTube] cấu hình tải: "
-            f"quality={ctx['quality']} | cookies={ctx['cookies']} | "
+            f"quality={ctx['quality']} | "
             f"aria2c={'bật' if ctx['using_aria2c'] else 'tắt'} | "
             f"N={ctx['concurrent_fragments']}",
             "info",
@@ -311,27 +310,63 @@ def download_youtube_video(
     except yt_dlp.utils.DownloadError as e:
         err_msg = str(e)
         if "Requested format is not available" in err_msg or "format" in err_msg.lower():
-            # Retry with absolute fallback: accept any available format
+            # ── Fallback stage 1: same cookies, simplest possible format ──────
+            # Eliminates format-string complexity; keeps whatever auth is set.
             if log_fn:
-                log_fn("[YouTube] format yêu cầu không có sẵn, thử lại với format tự động...", "warn")
-            fallback_opts = _build_ydl_opts(out_dir, "best", progress_hook, use_cookies)
-            fallback_opts["format"] = "best/bestvideo+bestaudio"
-            fallback_opts["js_runtimes"] = {"node": {}}
-            # Ensure tv_embedded client is used if no cookies
-            if "extractor_args" in fallback_opts:
-                fallback_opts["extractor_args"] = {
-                    "youtube": {"player_client": ["tv_embedded", "ios", "android", "web"]}
-                }
+                log_fn("[YouTube] format không khả dụng, thử lại với format tự động...", "warn")
+            f1 = _build_ydl_opts(out_dir, "best", progress_hook, use_cookies)
+            f1["format"] = "best"                    # no DASH requirement
+            f1.pop("extractor_args", None)           # let yt-dlp pick client
             try:
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                with yt_dlp.YoutubeDL(f1) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if info:
                         if log_fn:
-                            log_fn("[YouTube] tải thành công với format fallback.", "info")
+                            log_fn("[YouTube] tải thành công (fallback 1).", "info")
                         return ydl.prepare_filename(info)
+            except yt_dlp.utils.DownloadError:
+                pass   # continue to stage 2
             except Exception as e2:
                 if log_fn:
-                    log_fn(f"[YouTube] lỗi fallback: {e2}", "err")
+                    log_fn(f"[YouTube] lỗi fallback 1: {e2}", "err")
+
+            # ── Fallback stage 2: tv_embedded, NO cookies ─────────────────
+            # Cookies in the file may be expired — bypass them entirely.
+            # tv_embedded + mweb access public progressive streams without
+            # requiring a PO-token or valid session.
+            if log_fn:
+                log_fn("[YouTube] thử tv_embedded không dùng cookies...", "warn")
+            f2: dict = {
+                "format":               "best",
+                "outtmpl":              os.path.join(out_dir, "%(title)s.%(ext)s"),
+                "quiet":                True,
+                "no_warnings":          True,
+                "merge_output_format":  "mp4",
+                "prefer_ffmpeg":        True,
+                "nocheckcertificate":   True,
+                "retries":              5,
+                "fragment_retries":     5,
+                "js_runtimes":          {"node": {}},
+                "extractor_args":       {
+                    "youtube": {"player_client": ["tv_embedded", "mweb"]}
+                },
+            }
+            if progress_hook:
+                f2["progress_hooks"] = [progress_hook]
+            try:
+                with yt_dlp.YoutubeDL(f2) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
+                        if log_fn:
+                            log_fn("[YouTube] tải thành công (tv_embedded).", "info")
+                        return ydl.prepare_filename(info)
+            except Exception as e3:
+                if log_fn:
+                    log_fn(
+                        "[YouTube] Thất bại. Cookies có thể đã hết hạn — "
+                        "hãy xuất lại youtube_cookies.txt từ trình duyệt.",
+                        "err",
+                    )
         else:
             if log_fn:
                 log_fn(f"[YouTube] lỗi tải: {e}", "err")
