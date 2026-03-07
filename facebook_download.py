@@ -17,12 +17,19 @@ import os
 import re
 import io
 import sys
+import json
 from contextlib import contextmanager
 from typing import Callable
 
 import requests
 from http.cookiejar import MozillaCookieJar
+import base64
 import yt_dlp
+
+
+# ── Module-level cache for pagination query hash (refreshed per process) ─────
+_cached_reels_doc_id: str | None = None
+_REELS_PAGINATION_QUERY = 'ProfileCometAppCollectionReelsRendererPaginationQuery'
 
 
 # ── URL validation ──────────────────────────────────────────────────────────────
@@ -292,18 +299,21 @@ _SCRAPE_HEADERS = {
 
 
 def _scrape_video_urls(page_url: str, max_videos: int | None = None) -> list[str]:
-    """Scrape individual video/reel URLs from a Facebook profile-like page.
+    """Scrape video/reel URLs from a Facebook profile page, with cursor pagination.
 
     Strategy:
-      1. Fetch the page HTML with cookies
-      2. Extract reel IDs from /reel/ID and escaped \\/reel\\/ID patterns
-      3. Extract video IDs from /videos/ID patterns
-      4. Build full URLs and deduplicate
-      5. For bare username profiles (no /reels or /videos), try /reels/ then /videos/ pages
+      1. Fetch the profile/reels/videos page HTML with authentication cookies
+      2. Extract reel and video IDs from the initial HTML (~10 items)
+      3. Extract GraphQL pagination tokens (lsd, fb_dtsg, app_collection node ID)
+      4. Discover the Relay pagination query hash from loaded JS bundles (cached)
+      5. Paginate via Facebook's GraphQL API until all videos are retrieved
     """
+    global _cached_reels_doc_id
+
     cookie_file = _get_cookie_file()
     session = requests.Session()
 
+    cj: MozillaCookieJar | None = None
     if cookie_file:
         try:
             cj = MozillaCookieJar(cookie_file)
@@ -312,66 +322,184 @@ def _scrape_video_urls(page_url: str, max_videos: int | None = None) -> list[str
         except Exception:
             pass
 
-    def _extract_ids_from_html(html: str) -> list[str]:
-        """Extract video URLs from Facebook page HTML."""
-        found_urls: list[str] = []
-        seen_ids: set[str] = set()
-
-        # Reel IDs: /reel/12345 and escaped \/reel\/12345
-        for reel_id in re.findall(r'(?:/|\\/)reel(?:/|\\/)(\d+)', html):
-            if reel_id not in seen_ids:
-                seen_ids.add(reel_id)
-                found_urls.append(f'https://www.facebook.com/reel/{reel_id}')
-
-        # Video IDs: /videos/12345
-        for vid_id in re.findall(r'/videos/(\d+)', html):
-            if vid_id not in seen_ids:
-                seen_ids.add(vid_id)
-                found_urls.append(f'https://www.facebook.com/watch/?v={vid_id}')
-
-        # video_id in JSON: "video_id":"12345"
-        for vid_id in re.findall(r'"video_id":"(\d+)"', html):
-            if vid_id not in seen_ids:
-                seen_ids.add(vid_id)
-                found_urls.append(f'https://www.facebook.com/watch/?v={vid_id}')
-
-        return found_urls
-
-    def _fetch_page(target_url: str) -> list[str]:
-        try:
-            resp = session.get(
-                target_url, headers=_SCRAPE_HEADERS,
-                timeout=20, allow_redirects=True)
-            if resp.status_code != 200:
-                return []
-            return _extract_ids_from_html(resp.text)
-        except Exception:
-            return []
-
-    clean_url = page_url.strip().rstrip('/')
+    seen_ids: set[str] = set()
     all_urls: list[str] = []
 
-    # Check if the URL already specifies /reels/ or /videos/
-    if '/reels' in clean_url or '/videos' in clean_url:
-        all_urls = _fetch_page(clean_url)
-    elif '/profile.php' in clean_url:
-        # For profile.php, fetch the main page
-        all_urls = _fetch_page(clean_url)
+    def _add_url(url: str) -> None:
+        """Add a video URL, deduplicating by numeric ID."""
+        m = re.search(r'/reel/(\d+)|[?&]v=(\d+)', url)
+        vid_id = (m.group(1) or m.group(2)) if m else url
+        if vid_id not in seen_ids:
+            seen_ids.add(vid_id)
+            all_urls.append(url)
+
+    def _extract_video_urls(text: str) -> list[str]:
+        """Extract reel/video URLs from HTML or JSON text."""
+        found: list[str] = []
+        local_seen: set[str] = set()
+        for reel_id in re.findall(r'(?:/|\\/)reel(?:/|\\/)(\d+)', text):
+            if reel_id not in local_seen:
+                local_seen.add(reel_id)
+                found.append(f'https://www.facebook.com/reel/{reel_id}')
+        for vid_id in re.findall(r'"video_id"\s*:\s*"(\d+)"', text):
+            if vid_id not in local_seen:
+                local_seen.add(vid_id)
+                found.append(f'https://www.facebook.com/watch/?v={vid_id}')
+        return found
+
+    def _fetch_html(url: str) -> str:
+        try:
+            r = session.get(url, headers=_SCRAPE_HEADERS, timeout=20, allow_redirects=True)
+            return r.text if r.status_code == 200 else ''
+        except Exception:
+            return ''
+
+    # ── Determine which URL to fetch ──────────────────────────────────────────
+    clean = page_url.strip().rstrip('/')
+    if '/profile.php' in clean or '/reels' in clean or '/videos' in clean or 'sk=' in clean:
+        primary_url = clean
+        fallback_url = None
     else:
-        # Bare username — try /reels/ first, then /videos/
-        reels_url = clean_url + '/reels/'
-        all_urls = _fetch_page(reels_url)
-        if not all_urls:
-            videos_url = clean_url + '/videos/'
-            all_urls = _fetch_page(videos_url)
-        if not all_urls:
-            # Fallback: try the bare profile page itself
-            all_urls = _fetch_page(clean_url)
+        primary_url = clean + '/reels/'
+        fallback_url = clean + '/videos/'
 
-    if max_videos and len(all_urls) > max_videos:
-        all_urls = all_urls[:max_videos]
+    # ── Fetch initial page ────────────────────────────────────────────────────
+    html = _fetch_html(primary_url)
+    if not html and fallback_url:
+        html = _fetch_html(fallback_url)
+    if not html and clean != primary_url:
+        html = _fetch_html(clean)
+    if not html:
+        return []
 
-    return all_urls
+    for u in _extract_video_urls(html):
+        _add_url(u)
+
+    # ── Extract pagination metadata ───────────────────────────────────────────
+    cursor_m = re.search(r'"end_cursor"\s*:\s*"([^"]+)"', html)
+    has_next_m = re.search(r'"has_next_page"\s*:\s*(true|false)', html)
+    cursor = cursor_m.group(1) if cursor_m else None
+    has_next = (has_next_m.group(1) == 'true') if has_next_m else bool(cursor)
+
+    if not (cursor and has_next):
+        return all_urls[:max_videos] if max_videos else all_urls
+
+    if max_videos and len(all_urls) >= max_videos:
+        return all_urls[:max_videos]
+
+    # Extract auth tokens needed for GraphQL
+    lsd_m  = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', html)
+    dtsg_m = re.search(r'"DTSGInitData",\[\],\{"token":"([^"]+)"', html)
+    lsd     = lsd_m.group(1) if lsd_m else None
+    fb_dtsg = dtsg_m.group(1) if dtsg_m else None
+    fb_c_user = next(
+        (c.value for c in session.cookies if c.name == 'c_user'), None
+    )
+    jazoest = ('2' + ''.join(str(ord(c)) for c in lsd)) if lsd else None
+
+    # Extract app_collection base64 node ID (identifies the reels feed node)
+    collection_id: str | None = None
+    for b64 in re.findall(r'"id"\s*:\s*"([A-Za-z0-9+/]{20,}={0,2})"', html):
+        try:
+            decoded = base64.b64decode(b64 + '==').decode('utf-8', errors='replace')
+            if 'app_collection' in decoded:
+                collection_id = b64
+                break
+        except Exception:
+            pass
+
+    if not (lsd and fb_dtsg and collection_id):
+        return all_urls[:max_videos] if max_videos else all_urls
+
+    # ── Discover Relay pagination query doc_id from JS bundles (cached) ───────
+    if not _cached_reels_doc_id:
+        js_urls = list(set(re.findall(
+            r'"(https://static[^"]+rsrc\.php[^"]*\.js[^"]*)"', html)))
+        for js_url in js_urls:
+            try:
+                rj = session.get(
+                    js_url,
+                    headers={'User-Agent': _SCRAPE_HEADERS['User-Agent']},
+                    timeout=30,
+                )
+                if rj.status_code != 200 or _REELS_PAGINATION_QUERY not in rj.text:
+                    continue
+                js = rj.text
+                for m in re.finditer(re.escape(_REELS_PAGINATION_QUERY), js):
+                    ctx = js[max(0, m.start() - 500):m.start() + 500]
+                    ids = re.findall(r'\b(\d{15,})\b', ctx)
+                    if ids:
+                        _cached_reels_doc_id = ids[0]
+                        break
+                if _cached_reels_doc_id:
+                    break
+            except Exception:
+                continue
+
+    if not _cached_reels_doc_id:
+        return all_urls[:max_videos] if max_videos else all_urls
+
+    # ── Paginate via Facebook's GraphQL endpoint ──────────────────────────────
+    post_headers = {
+        'User-Agent':      _SCRAPE_HEADERS['User-Agent'],
+        'Accept-Language': _SCRAPE_HEADERS['Accept-Language'],
+        'Content-Type':    'application/x-www-form-urlencoded',
+        'X-FB-LSD':        lsd,
+        'Origin':          'https://www.facebook.com',
+        'Referer':         primary_url,
+        'Sec-Fetch-Dest':  'empty',
+        'Sec-Fetch-Mode':  'cors',
+        'Sec-Fetch-Site':  'same-origin',
+    }
+
+    for _ in range(100):  # safety cap: max 100 extra pages (~2400 more videos)
+        if max_videos and len(all_urls) >= max_videos:
+            break
+        try:
+            payload = {
+                'av':                      fb_c_user or '0',
+                '__user':                  fb_c_user or '0',
+                '__a':                     '1',
+                'lsd':                     lsd,
+                'jazoest':                 jazoest,
+                'fb_dtsg':                 fb_dtsg,
+                'server_timestamps':       'true',
+                'fb_api_caller_class':     'RelayModern',
+                'fb_api_req_friendly_name': _REELS_PAGINATION_QUERY,
+                'variables': json.dumps({
+                    'cursor': cursor,
+                    'count':  24,
+                    'id':     collection_id,
+                    'scale':  2,
+                }),
+                'doc_id': _cached_reels_doc_id,
+            }
+            resp = session.post(
+                'https://www.facebook.com/api/graphql/',
+                data=payload, headers=post_headers, timeout=20,
+            )
+            if resp.status_code != 200:
+                break
+            text = resp.text
+            if text.startswith('for (;;);'):
+                text = text[9:]
+            # Hard error: API rejected request (missing "data" key)
+            if '"data"' not in text:
+                break
+
+            for u in _extract_video_urls(text):
+                _add_url(u)
+
+            next_cur_m  = re.search(r'"end_cursor"\s*:\s*"([^"]+)"', text)
+            has_next_m2 = re.search(r'"has_next_page"\s*:\s*(true|false)', text)
+            has_more    = has_next_m2.group(1) == 'true' if has_next_m2 else False
+            cursor = (next_cur_m.group(1) if (next_cur_m and has_more) else None)
+            if not cursor:
+                break
+        except Exception:
+            break
+
+    return all_urls[:max_videos] if max_videos else all_urls
 
 
 def _extract_single_info(url: str) -> list[dict]:
