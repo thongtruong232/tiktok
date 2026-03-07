@@ -228,7 +228,8 @@ def download_instagram_multi(
     return ok, len(urls)
 
 
-def fetch_instagram_video_list(url: str, max_videos: int | None = None) -> list[dict]:
+def fetch_instagram_video_list(url: str, max_videos: int | None = None,
+                               on_result: Callable[[dict], None] | None = None) -> list[dict]:
     """Fetch video metadata from an Instagram URL (post, reel, or profile).
 
     Returns list of dicts: {url, title, thumbnail, view_count, duration, uploader,
@@ -257,28 +258,51 @@ def fetch_instagram_video_list(url: str, max_videos: int | None = None) -> list[
                     return results
 
                 entries = info.get('entries')
-                items = list(entries) if entries else [info]
+                if entries:
+                    for entry in entries:
+                        if entry is None:
+                            continue
+                        thumb = ''
+                        if entry.get('thumbnails'):
+                            thumb = entry['thumbnails'][-1].get('url', '')
+                        elif entry.get('thumbnail'):
+                            thumb = entry['thumbnail']
 
-                for entry in items:
-                    if entry is None:
-                        continue
+                        d = {
+                            'url':           entry.get('webpage_url')
+                                             or entry.get('url') or url,
+                            'title':         entry.get('title') or 'Không rõ',
+                            'thumbnail':     thumb,
+                            'view_count':    entry.get('view_count') or 0,
+                            'duration':      entry.get('duration') or 0,
+                            'uploader':      entry.get('uploader') or '',
+                            'like_count':    entry.get('like_count') or 0,
+                            'comment_count': entry.get('comment_count') or 0,
+                        }
+                        results.append(d)
+                        if on_result:
+                            on_result(d)
+                else:
                     thumb = ''
-                    if entry.get('thumbnails'):
-                        thumb = entry['thumbnails'][-1].get('url', '')
-                    elif entry.get('thumbnail'):
-                        thumb = entry['thumbnail']
+                    if info.get('thumbnails'):
+                        thumb = info['thumbnails'][-1].get('url', '')
+                    elif info.get('thumbnail'):
+                        thumb = info['thumbnail']
 
-                    results.append({
-                        'url':           entry.get('webpage_url')
-                                         or entry.get('url') or url,
-                        'title':         entry.get('title') or 'Không rõ',
+                    d = {
+                        'url':           info.get('webpage_url')
+                                         or info.get('url') or url,
+                        'title':         info.get('title') or 'Không rõ',
                         'thumbnail':     thumb,
-                        'view_count':    entry.get('view_count') or 0,
-                        'duration':      entry.get('duration') or 0,
-                        'uploader':      entry.get('uploader') or '',
-                        'like_count':    entry.get('like_count') or 0,
-                        'comment_count': entry.get('comment_count') or 0,
-                    })
+                        'view_count':    info.get('view_count') or 0,
+                        'duration':      info.get('duration') or 0,
+                        'uploader':      info.get('uploader') or '',
+                        'like_count':    info.get('like_count') or 0,
+                        'comment_count': info.get('comment_count') or 0,
+                    }
+                    results.append(d)
+                    if on_result:
+                        on_result(d)
     except Exception:
         pass
 

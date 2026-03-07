@@ -90,6 +90,8 @@ class App:
         self._thumb_counter: int            = 0           # unique texture tag counter
         self._thumb_loaded: set[int]        = set()        # indices whose thumbnails are downloaded
         self._grid_rendered_count: int      = 0            # how many cards currently rendered
+        self._grid_current_row_tag: str | None = None      # tag of current (possibly incomplete) row
+        self._grid_cols: int                = 4            # columns per row (recalculated on search)
         self._searching: bool               = False       # search in progress flag
         self._merge_items: list[str]        = []          # merge listbox items
         self._batch_items: list[str]        = []          # batch listbox items
@@ -624,19 +626,16 @@ class App:
                          daemon=True).start()
 
     def _search_worker(self, url: str):
-        """Background worker to fetch video list."""
+        """Background worker to fetch video list with streaming display."""
         try:
+            # Detect platform first
             if is_youtube_url(url):
-                results = fetch_video_list(url)
                 platform = "youtube"
             elif is_tiktok_url(url):
-                results = fetch_tiktok_video_list(url)
                 platform = "tiktok"
             elif is_facebook_url(url):
-                results = fetch_facebook_video_list(url)
                 platform = "facebook"
             elif is_instagram_url(url):
-                results = fetch_instagram_video_list(url)
                 platform = "instagram"
             else:
                 self._log(
@@ -644,21 +643,36 @@ class App:
                     "err")
                 return
 
-            for r in results:
-                r["platform"] = platform
-
-            self._search_results = results
+            # Clear state and prepare grid for streaming
+            self._search_results = []
             self._search_selected.clear()
+            self._log_queue.put(("ui", self._prepare_grid_for_streaming))
+
+            def on_result(video: dict):
+                video["platform"] = platform
+                self._search_results.append(video)
+                self._log_queue.put(("ui", self._render_cards))
+
+            # Fetch with streaming callback
+            if platform == "youtube":
+                fetch_video_list(url, on_result=on_result)
+            elif platform == "tiktok":
+                fetch_tiktok_video_list(url, on_result=on_result)
+            elif platform == "facebook":
+                fetch_facebook_video_list(url, on_result=on_result)
+            elif platform == "instagram":
+                fetch_instagram_video_list(url, on_result=on_result)
+
+            count = len(self._search_results)
 
             # Auto-select if only 1 result
-            if len(results) == 1:
+            if count == 1:
                 self._search_selected.add(0)
 
-            count = len(results)
             self._log(f"Tìm thấy {count} video.", "ok" if count > 0 else "info")
 
-            # Rebuild grid on render thread
-            self._log_queue.put(("ui", self._rebuild_video_grid))
+            # Final render pass (handle remaining cards + load-more button)
+            self._log_queue.put(("ui", self._finalize_search_grid))
 
         except Exception as e:
             self._log(f"Lỗi tìm kiếm: {e}", "err")
@@ -667,8 +681,11 @@ class App:
             self._log_queue.put(("ui", lambda: dpg.configure_item(
                 "dl_search_btn", enabled=True)))
 
-    def _rebuild_video_grid(self):
-        """Reset grid state and render first batch. Runs on render thread."""
+    # ── Grid streaming helpers ────────────────────────────────────────────────
+
+    def _prepare_grid_for_streaming(self):
+        """Clear the video grid and reset state for a new streaming search.
+        Runs on render thread."""
         # Clear existing grid content
         if dpg.does_item_exist("dl_grid"):
             children = dpg.get_item_children("dl_grid", slot=1)
@@ -683,126 +700,137 @@ class App:
         self._thumb_textures.clear()
         self._thumb_loaded.clear()
         self._grid_rendered_count = 0
+        self._grid_current_row_tag = None
 
-        total = len(self._search_results)
-        sel_count = len(self._search_selected)
-
-        dpg.set_value(
-            "dl_result_count",
-            f"{total} video tìm thấy" if total else "Không tìm thấy video")
-        dpg.set_value(
-            "dl_sel_count",
-            f"{sel_count} đã chọn" if sel_count else "")
-        self._update_dl_btn_label()
-
-        if total == 0:
-            dpg.add_text("Không tìm thấy video nào.",
-                         parent="dl_grid", color=_CF3, indent=20)
-            return
-
-        # Render first batch
-        self._render_grid_batch()
-
-    def _render_grid_batch(self):
-        """Render the next _GRID_BATCH cards and add 'load more' if needed.
-        Runs on render thread (called directly or from button callback)."""
-        total = len(self._search_results)
-        start = self._grid_rendered_count
-        if start >= total:
-            return
-
-        # Remove 'load more' sentinel so we can append new rows above it
-        if dpg.does_item_exist("dl_load_more_grp"):
-            dpg.delete_item("dl_load_more_grp")
-
-        # Calculate columns from current grid width
+        # Recalculate column count from current grid width
         try:
             grid_w = dpg.get_item_width("dl_grid")
             if grid_w <= 0:
                 grid_w = dpg.get_item_width("content_host") - 40
         except Exception:
             grid_w = 800
-        cols = max(1, (grid_w - 20) // _CARD_W)
+        self._grid_cols = max(1, (grid_w - 20) // _CARD_W)
 
-        end = min(start + _GRID_BATCH, total)
+        dpg.set_value("dl_result_count", "Đang tìm kiếm...")
+        dpg.set_value("dl_sel_count", "")
+        self._update_dl_btn_label()
+
+    def _create_video_card(self, idx: int, parent: str, placeholder: list):
+        """Create a single video card inside *parent* (a horizontal row group)."""
+        video = self._search_results[idx]
+        is_sel = idx in self._search_selected
+
+        tex_tag = f"vthumb_{self._thumb_counter}"
+        self._thumb_counter += 1
+        with dpg.texture_registry():
+            dpg.add_dynamic_texture(
+                _THUMB_W, _THUMB_H, placeholder, tag=tex_tag)
+        self._thumb_textures[idx] = tex_tag
+
+        card_tag = f"vcard_{idx}"
+        with dpg.child_window(tag=card_tag, width=_CARD_W,
+                              height=_CARD_H, border=True,
+                              no_scrollbar=True,
+                              no_scroll_with_mouse=True,
+                              parent=parent):
+            dpg.bind_item_theme(
+                card_tag,
+                "th_vcard_sel" if is_sel else "th_vcard")
+
+            dpg.add_spacer(height=6)
+
+            img_btn = dpg.add_image_button(
+                tex_tag, width=_THUMB_W, height=_THUMB_H,
+                callback=lambda s, a, u: self._toggle_video_select(u),
+                user_data=idx, indent=14)
+            dpg.bind_item_theme(img_btn, "th_thumb_btn")
+
+            title = (video.get("title") or "")[:26]
+            dpg.add_text(title, color=_CF, indent=4)
+
+            views = video.get("view_count", 0)
+            dur = video.get("duration", 0)
+            info_parts = [self._format_views(views)]
+            if dur:
+                m, s = divmod(int(dur), 60)
+                info_parts.append(f"{m}:{s:02d}")
+            dpg.add_text("  ·  ".join(info_parts),
+                         color=_CF2, indent=4)
+
+            likes    = video.get("like_count", 0)
+            comments = video.get("comment_count", 0)
+            shares   = video.get("repost_count", 0)
+            stat_parts: list[str] = []
+            if likes:
+                stat_parts.append(f"Like:{self._fmt_n(likes)}")
+            if comments:
+                stat_parts.append(f"Cmt:{self._fmt_n(comments)}")
+            if shares:
+                stat_parts.append(f"Share:{self._fmt_n(shares)}")
+            dpg.add_text(
+                "  ".join(stat_parts) if stat_parts else "",
+                color=_CF2, indent=4)
+
+            dpg.add_text(
+                "✓ Đã chọn" if is_sel else "",
+                tag=f"vsel_{idx}", color=_CL_OK, indent=4)
+
+        dpg.add_spacer(width=4, parent=parent)
+
+    def _render_cards(self, max_count: int | None = None):
+        """Render un-rendered video cards.  Idempotent — safe to call repeatedly.
+
+        *max_count*: max cards to render this call (None = all pending).
+        During streaming (self._searching), auto-caps at _GRID_BATCH * 5 cards.
+        Runs on render thread.
+        """
+        total = len(self._search_results)
+        start = self._grid_rendered_count
+
+        if max_count is not None:
+            end = min(start + max_count, total)
+        else:
+            end = total
+
+        # During streaming, cap rendered cards to avoid overwhelming the UI
+        if self._searching and end > _GRID_BATCH * 5:
+            end = min(end, _GRID_BATCH * 5)
+
+        # Always update count label
+        dpg.set_value("dl_result_count", f"{total} video tìm thấy")
+
+        if start >= end:
+            return
+
+        # Remove existing 'load more' button
+        if dpg.does_item_exist("dl_load_more_grp"):
+            dpg.delete_item("dl_load_more_grp")
+
+        cols = self._grid_cols
         placeholder = [0.15, 0.15, 0.15, 1.0] * (_THUMB_W * _THUMB_H)
 
-        for row_start in range(start, end, cols):
-            with dpg.group(horizontal=True, parent="dl_grid", indent=8):
-                for idx in range(row_start, min(row_start + cols, end)):
-                    video = self._search_results[idx]
-                    is_sel = idx in self._search_selected
+        new_indices: list[int] = []
+        for idx in range(start, end):
+            col_in_row = idx % cols
 
-                    tex_tag = f"vthumb_{self._thumb_counter}"
-                    self._thumb_counter += 1
-                    with dpg.texture_registry():
-                        dpg.add_dynamic_texture(
-                            _THUMB_W, _THUMB_H, placeholder, tag=tex_tag)
-                    self._thumb_textures[idx] = tex_tag
+            if col_in_row == 0:
+                # Add spacer after previous row (skip for very first row)
+                if idx > 0:
+                    dpg.add_spacer(height=4, parent="dl_grid")
+                # Create new horizontal row group
+                row_tag = f"vrow_{idx // cols}"
+                dpg.add_group(tag=row_tag, horizontal=True,
+                              parent="dl_grid", indent=8)
+                self._grid_current_row_tag = row_tag
 
-                    card_tag = f"vcard_{idx}"
-                    with dpg.child_window(tag=card_tag, width=_CARD_W,
-                                          height=_CARD_H, border=True,
-                                          no_scrollbar=True,
-                                          no_scroll_with_mouse=True):
-                        dpg.bind_item_theme(
-                            card_tag,
-                            "th_vcard_sel" if is_sel else "th_vcard")
-
-                        # Top spacer for visual breathing room
-                        dpg.add_spacer(height=6)
-
-                        # Thumbnail — th_thumb_btn zeroes FramePadding → exact _THUMB_W×_THUMB_H px
-                        # indent=14 centers the 192px image inside 220px card
-                        img_btn = dpg.add_image_button(
-                            tex_tag, width=_THUMB_W, height=_THUMB_H,
-                            callback=lambda s, a, u: self._toggle_video_select(u),
-                            user_data=idx, indent=14)
-                        dpg.bind_item_theme(img_btn, "th_thumb_btn")
-
-                        # Title — truncated to 1 line (no wrap to keep fixed height)
-                        title = (video.get("title") or "")[:26]
-                        dpg.add_text(title, color=_CF, indent=4)
-
-                        views = video.get("view_count", 0)
-                        dur = video.get("duration", 0)
-                        info_parts = [self._format_views(views)]
-                        if dur:
-                            m, s = divmod(int(dur), 60)
-                            info_parts.append(f"{m}:{s:02d}")
-                        dpg.add_text("  ·  ".join(info_parts),
-                                     color=_CF2, indent=4)
-
-                        # Engagement stats — platform-specific (empty string keeps height fixed)
-                        is_tt    = "tiktok.com" in video.get("url", "")
-                        likes    = video.get("like_count", 0)
-                        comments = video.get("comment_count", 0)
-                        shares   = video.get("repost_count", 0)
-                        stat_parts: list[str] = []
-                        if likes:
-                            stat_parts.append(f"Like:{self._fmt_n(likes)}")
-                        if comments:
-                            stat_parts.append(f"Cmt:{self._fmt_n(comments)}")
-                        if is_tt and shares:
-                            stat_parts.append(f"Share:{self._fmt_n(shares)}")
-                        dpg.add_text(
-                            "  ".join(stat_parts) if stat_parts else "",
-                            color=_CF2, indent=4)
-
-                        # Selection indicator — always rendered (empty = not selected)
-                        # Using set_value keeps card height fixed regardless of state
-                        dpg.add_text(
-                            "✓ Đã chọn" if is_sel else "",
-                            tag=f"vsel_{idx}", color=_CL_OK, indent=4)
-
-                    dpg.add_spacer(width=4)
-            dpg.add_spacer(height=4, parent="dl_grid")
+            self._create_video_card(idx, self._grid_current_row_tag, placeholder)
+            new_indices.append(idx)
 
         self._grid_rendered_count = end
 
-        # Show 'load more' button if there are remaining cards
+        # Show 'load more' only when NOT streaming and there are remaining cards
         remaining = total - end
-        if remaining > 0:
+        if remaining > 0 and not self._searching:
             with dpg.group(tag="dl_load_more_grp", parent="dl_grid", indent=8):
                 dpg.add_spacer(height=4)
                 load_btn = dpg.add_button(
@@ -810,14 +838,51 @@ class App:
                           f"  ({remaining} còn lại / {total} tổng)",
                     tag="dl_load_more_btn",
                     width=-20, height=36,
-                    callback=lambda: self._render_grid_batch())
+                    callback=lambda: self._render_cards(_GRID_BATCH))
                 dpg.bind_item_theme(load_btn, "th_accent")
                 dpg.add_spacer(height=8)
 
-        # Load thumbnails only for this new batch
-        new_indices = list(range(start, end))
-        threading.Thread(target=self._load_thumbnails_range,
-                         args=(new_indices,), daemon=True).start()
+        # Update selection labels
+        sel_count = len(self._search_selected)
+        dpg.set_value("dl_sel_count",
+                      f"{sel_count} đã chọn" if sel_count else "")
+        self._update_dl_btn_label()
+
+        # Load thumbnails for newly rendered cards
+        if new_indices:
+            threading.Thread(target=self._load_thumbnails_range,
+                             args=(new_indices,), daemon=True).start()
+
+    def _finalize_search_grid(self):
+        """Called after streaming search completes.  Renders any remaining
+        cards and adds 'load more' if needed.  Runs on render thread."""
+        total = len(self._search_results)
+
+        if total == 0:
+            dpg.add_text("Không tìm thấy video nào.",
+                         parent="dl_grid", color=_CF3, indent=20)
+            dpg.set_value("dl_result_count", "Không tìm thấy video")
+            return
+
+        # Render next batch of un-rendered cards (with load-more for the rest)
+        remaining = total - self._grid_rendered_count
+        if remaining > 0:
+            self._render_cards(_GRID_BATCH)
+
+        dpg.set_value("dl_result_count", f"{total} video tìm thấy")
+        self._update_dl_btn_label()
+
+    def _rebuild_video_grid(self):
+        """Full grid rebuild (used for non-streaming scenarios like resize).
+        Runs on render thread."""
+        self._prepare_grid_for_streaming()
+        total = len(self._search_results)
+        if total == 0:
+            dpg.add_text("Không tìm thấy video nào.",
+                         parent="dl_grid", color=_CF3, indent=20)
+            dpg.set_value("dl_result_count", "Không tìm thấy video")
+            return
+        self._render_cards(_GRID_BATCH)
 
     def _toggle_video_select(self, idx: int):
         """Toggle selection of a video card."""

@@ -232,7 +232,8 @@ def download_from_profile(profile_url, output_path='downloads', max_videos=None,
     return False
 
 
-def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dict]:
+def fetch_tiktok_video_list(url: str, max_videos: int | None = None,
+                            on_result=None) -> list[dict]:
     """Fetch video metadata from a TikTok URL (video or profile).
 
     Returns list of dicts: {url, title, thumbnail, view_count, duration, uploader}
@@ -255,7 +256,7 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(target_url, download=False)
 
-    def _parse_info(info):
+    def _parse_info(info, on_result_cb=None):
         results = []
         if not info:
             return results
@@ -269,7 +270,7 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
                     thumb = entry["thumbnails"][-1].get("url", "")
                 elif entry.get("thumbnail"):
                     thumb = entry["thumbnail"]
-                results.append({
+                d = {
                     "url":           entry.get("url") or entry.get("webpage_url") or "",
                     "title":         entry.get("title") or "Không rõ",
                     "thumbnail":     thumb,
@@ -279,14 +280,17 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
                     "like_count":    entry.get("like_count") or 0,
                     "comment_count": entry.get("comment_count") or 0,
                     "repost_count":  entry.get("repost_count") or entry.get("share_count") or 0,
-                })
+                }
+                results.append(d)
+                if on_result_cb:
+                    on_result_cb(d)
         else:
             thumb = ""
             if info.get("thumbnails"):
                 thumb = info["thumbnails"][-1].get("url", "")
             elif info.get("thumbnail"):
                 thumb = info["thumbnail"]
-            results.append({
+            d = {
                 "url":           info.get("webpage_url") or url,
                 "title":         info.get("title") or "Không rõ",
                 "thumbnail":     thumb,
@@ -296,14 +300,17 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
                 "like_count":    info.get("like_count") or 0,
                 "comment_count": info.get("comment_count") or 0,
                 "repost_count":  info.get("repost_count") or info.get("share_count") or 0,
-            })
+            }
+            results.append(d)
+            if on_result_cb:
+                on_result_cb(d)
         return results
 
     # Try normal extraction
     try:
         with _suppress_stderr():
             info = _try_extract(url)
-            return _parse_info(info)
+            return _parse_info(info, on_result)
     except Exception as e:
         if 'Unable to extract secondary user ID' not in str(e):
             return []
@@ -315,6 +322,6 @@ def fetch_tiktok_video_list(url: str, max_videos: int | None = None) -> list[dic
 
     try:
         info = _try_extract(f"tiktokuser:{channel_id}")
-        return _parse_info(info)
+        return _parse_info(info, on_result)
     except Exception:
         return []

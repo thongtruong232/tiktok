@@ -608,7 +608,8 @@ def get_video_info(url: str) -> dict | None:
 
 
 def fetch_video_list(url: str, max_videos: int | None = None,
-                     use_cookies: bool = True) -> list[dict]:
+                     use_cookies: bool = True,
+                     on_result: Callable[[dict], None] | None = None) -> list[dict]:
     """Fetch video metadata from a YouTube URL (video, playlist, or channel).
 
     Returns list of dicts: {url, title, thumbnail, view_count, duration, uploader}
@@ -661,6 +662,8 @@ def fetch_video_list(url: str, max_videos: int | None = None,
                         "like_count":    entry.get("like_count") or 0,
                         "comment_count": entry.get("comment_count") or 0,
                     })
+                    if on_result:
+                        on_result(results[-1])
             else:
                 vid_id = info.get("id", "")
                 thumb = ""
@@ -682,6 +685,8 @@ def fetch_video_list(url: str, max_videos: int | None = None,
                     "like_count":    info.get("like_count") or 0,
                     "comment_count": info.get("comment_count") or 0,
                 })
+                if on_result:
+                    on_result(results[-1])
     except Exception:
         pass
 

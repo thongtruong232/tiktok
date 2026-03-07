@@ -259,26 +259,51 @@ def download_facebook_multi(
     return ok, len(urls)
 
 
-def fetch_facebook_video_list(url: str, max_videos: int | None = None) -> list[dict]:
+def fetch_facebook_video_list(url: str, max_videos: int | None = None,
+                              on_result: Callable[[dict], None] | None = None) -> list[dict]:
     """Fetch video metadata from a Facebook URL.
 
     Handles:
       - Single video / reel URLs → yt-dlp direct extraction
-      - Profile / reels / videos pages → scrapes HTML for video URLs,
-        then extracts metadata for each via yt-dlp
+      - Profile / reels / videos pages → scrapes URLs with GraphQL pagination,
+        returns basic metadata immediately (no yt-dlp per-URL overhead)
+
+    If *on_result* is provided, it is called for each video dict as soon as
+    it is discovered (streaming / progressive display).
 
     Returns list of dicts: {url, title, thumbnail, view_count, duration, uploader,
                             like_count, comment_count}
     """
-    # If it's a profile / reels / videos page, scrape URLs first
+    # If it's a profile / reels / videos page, scrape URLs (fast, no yt-dlp)
     if _is_fb_profile_or_listing(url):
-        video_urls = _scrape_video_urls(url, max_videos)
-        if not video_urls:
-            return []
-        return _extract_info_batch(video_urls)
+        results: list[dict] = []
 
-    # Single video URL — extract directly
-    return _extract_single_info(url)
+        def _on_url(video_url: str) -> None:
+            m = re.search(r'/reel/(\d+)|[?&]v=(\d+)', video_url)
+            vid_id = (m.group(1) or m.group(2)) if m else ''
+            d = {
+                'url': video_url,
+                'title': f'Facebook Reel {vid_id[-6:]}' if vid_id else 'Facebook Video',
+                'thumbnail': '',
+                'view_count': 0,
+                'duration': 0,
+                'uploader': '',
+                'like_count': 0,
+                'comment_count': 0,
+            }
+            results.append(d)
+            if on_result:
+                on_result(d)
+
+        _scrape_video_urls(url, max_videos, on_url_found=_on_url)
+        return results
+
+    # Single video URL — extract directly via yt-dlp
+    result = _extract_single_info(url)
+    if on_result:
+        for r in result:
+            on_result(r)
+    return result
 
 
 # ── Internal: scrape video URLs from a Facebook page ─────────────────────────────
@@ -298,7 +323,8 @@ _SCRAPE_HEADERS = {
 }
 
 
-def _scrape_video_urls(page_url: str, max_videos: int | None = None) -> list[str]:
+def _scrape_video_urls(page_url: str, max_videos: int | None = None,
+                       on_url_found: Callable[[str], None] | None = None) -> list[str]:
     """Scrape video/reel URLs from a Facebook profile page, with cursor pagination.
 
     Strategy:
@@ -307,6 +333,8 @@ def _scrape_video_urls(page_url: str, max_videos: int | None = None) -> list[str
       3. Extract GraphQL pagination tokens (lsd, fb_dtsg, app_collection node ID)
       4. Discover the Relay pagination query hash from loaded JS bundles (cached)
       5. Paginate via Facebook's GraphQL API until all videos are retrieved
+
+    If *on_url_found* is provided, it is called for each new URL as discovered.
     """
     global _cached_reels_doc_id
 
@@ -332,6 +360,8 @@ def _scrape_video_urls(page_url: str, max_videos: int | None = None) -> list[str
         if vid_id not in seen_ids:
             seen_ids.add(vid_id)
             all_urls.append(url)
+            if on_url_found:
+                on_url_found(url)
 
     def _extract_video_urls(text: str) -> list[str]:
         """Extract reel/video URLs from HTML or JSON text."""
