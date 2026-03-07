@@ -19,6 +19,7 @@ from youtube_download import (download_youtube_video, download_youtube_playlist,
                                QUALITY_OPTIONS, get_youtube_runtime_context,
                                is_youtube_url, fetch_video_list)
 from facebook_download import (download_facebook_video, download_facebook_multi,
+                                download_facebook_profile,
                                 is_facebook_url, fetch_facebook_video_list)
 from instagram_download import (download_instagram_video, download_instagram_profile,
                                  download_instagram_multi,
