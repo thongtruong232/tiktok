@@ -18,6 +18,11 @@ from youtube_download import (download_youtube_video, download_youtube_playlist,
                                download_youtube_multi, download_youtube_channel,
                                QUALITY_OPTIONS, get_youtube_runtime_context,
                                is_youtube_url, fetch_video_list)
+from facebook_download import (download_facebook_video, download_facebook_multi,
+                                is_facebook_url, fetch_facebook_video_list)
+from instagram_download import (download_instagram_video, download_instagram_profile,
+                                 download_instagram_multi,
+                                 is_instagram_url, fetch_instagram_video_list)
 import video_edit
 
 # ── Layout constants ───────────────────────────────────────────────────────────
@@ -626,9 +631,15 @@ class App:
             elif is_tiktok_url(url):
                 results = fetch_tiktok_video_list(url)
                 platform = "tiktok"
+            elif is_facebook_url(url):
+                results = fetch_facebook_video_list(url)
+                platform = "facebook"
+            elif is_instagram_url(url):
+                results = fetch_instagram_video_list(url)
+                platform = "instagram"
             else:
                 self._log(
-                    "URL không được hỗ trợ. Hãy nhập URL YouTube hoặc TikTok.",
+                    "URL không được hỗ trợ. Hãy nhập URL YouTube, TikTok, Facebook hoặc Instagram.",
                     "err")
                 return
 
@@ -2201,10 +2212,18 @@ class App:
                 targets.append(("yt_single", (url, quality, use_cookies)))
             elif platform == "tiktok":
                 targets.append(("tt_single", url))
+            elif platform == "facebook":
+                targets.append(("fb_single", (url, quality)))
+            elif platform == "instagram":
+                targets.append(("ig_single", (url, quality)))
             elif is_youtube_url(url):
                 targets.append(("yt_single", (url, quality, use_cookies)))
             elif is_tiktok_url(url):
                 targets.append(("tt_single", url))
+            elif is_facebook_url(url):
+                targets.append(("fb_single", (url, quality)))
+            elif is_instagram_url(url):
+                targets.append(("ig_single", (url, quality)))
 
         if not targets:
             self._log("Không có URL hợp lệ để tải.", "err")
@@ -2460,6 +2479,53 @@ class App:
                         url, out, quality, max_v, use_subfol, _prog_hook, self._log, use_cookies)
                     self._log(
                         f"Kênh hoàn thành: {ok_n} video đã tải.",
+                        "ok" if ok_n > 0 else "err")
+
+                # ── Facebook ──────────────────────────────────────────────────
+                elif kind == "fb_single":
+                    url, quality = payload
+                    self._log(f"[Facebook] Đang tải ({quality}): {url}", "info")
+                    fn = download_facebook_video(url, out, quality, _prog_hook, self._log)
+                    self._log(
+                        f"Hoàn thành: {os.path.basename(fn)}" if fn
+                        else f"Thất bại: {url}",
+                        "ok" if fn else "err")
+
+                elif kind == "fb_multi":
+                    urls, quality = payload
+                    self._log(f"[Facebook] Đang tải {len(urls)} URL ({quality})...", "info")
+                    ok_n, total = download_facebook_multi(
+                        urls, out, quality, _prog_hook, self._log)
+                    self._log(
+                        f"Hoàn thành: {ok_n}/{total} video.",
+                        "ok" if ok_n > 0 else "err")
+
+                # ── Instagram ─────────────────────────────────────────────────
+                elif kind == "ig_single":
+                    url, quality = payload
+                    self._log(f"[Instagram] Đang tải ({quality}): {url}", "info")
+                    fn = download_instagram_video(url, out, quality, _prog_hook, self._log)
+                    self._log(
+                        f"Hoàn thành: {os.path.basename(fn)}" if fn
+                        else f"Thất bại: {url}",
+                        "ok" if fn else "err")
+
+                elif kind == "ig_profile":
+                    url, quality, max_v = payload
+                    self._log(f"[Instagram] Đang tải profile ({quality}): {url}", "info")
+                    ok_n, total = download_instagram_profile(
+                        url, out, quality, max_v, _prog_hook, self._log)
+                    self._log(
+                        f"Profile hoàn thành: {ok_n} video đã tải.",
+                        "ok" if ok_n > 0 else "err")
+
+                elif kind == "ig_multi":
+                    urls, quality = payload
+                    self._log(f"[Instagram] Đang tải {len(urls)} URL ({quality})...", "info")
+                    ok_n, total = download_instagram_multi(
+                        urls, out, quality, _prog_hook, self._log)
+                    self._log(
+                        f"Hoàn thành: {ok_n}/{total} video.",
                         "ok" if ok_n > 0 else "err")
 
         except Exception as e:
